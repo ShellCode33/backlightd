@@ -1,0 +1,3 @@
+[workspace]
+members = ["backlightd", "backlightctl", "backlight_ipc"]
+resolver = "2"
