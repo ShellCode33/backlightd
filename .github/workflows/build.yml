@@ -1,4 +1,4 @@
-name: "Make sure the project compiles successfully"
+name: "CI"
 on:
   push:
   pull_request:
@@ -8,6 +8,10 @@ jobs:
     name: cargo build
     runs-on: ubuntu-latest
     steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libudev-dev
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo build --release
@@ -15,6 +19,10 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libudev-dev
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -25,6 +33,10 @@ jobs:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libudev-dev
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
