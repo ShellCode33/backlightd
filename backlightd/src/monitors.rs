@@ -2,10 +2,8 @@ use std::{
     fs::{self},
     sync::Mutex,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
-
-use chrono::{DateTime, Local};
 
 use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
@@ -17,7 +15,7 @@ use crate::ddc::BacklightDdcDevice;
 static MONITORS: Mutex<Vec<Box<dyn BacklightDevice + Send>>> = Mutex::new(Vec::new());
 
 /// The last time the list of known monitors was refreshed.
-static LAST_REFRESH: Mutex<Option<DateTime<Local>>> = Mutex::new(None);
+static LAST_REFRESH: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// The frequency at which the list of known monitors must be refreshed.
 const MONITORS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -36,12 +34,7 @@ pub(crate) fn auto_refresh_monitors_list() -> ! {
                 .expect("Unable to acquire LAST_REFRESH mutex");
 
             last_refresh.is_none()
-                || last_refresh.is_some_and(|dt| {
-                    (Local::now() - dt)
-                        .to_std()
-                        .unwrap_or(MONITORS_REFRESH_INTERVAL + Duration::from_secs(1))
-                        > MONITORS_REFRESH_INTERVAL
-                })
+                || last_refresh.is_some_and(|dt| Instant::now() - dt > MONITORS_REFRESH_INTERVAL)
         };
 
         if must_refresh {
@@ -89,7 +82,7 @@ pub(crate) fn refresh_monitors_list() {
 
     *LAST_REFRESH
         .lock()
-        .expect("Unable to acquire LAST_REFRESH mutex") = Some(Local::now());
+        .expect("Unable to acquire LAST_REFRESH mutex") = Some(Instant::now());
 }
 
 pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
