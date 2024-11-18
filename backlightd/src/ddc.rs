@@ -3,7 +3,7 @@ use std::error::Error;
 use anyhow::bail;
 use ddc_hi::{Ddc, Display, FeatureCode};
 
-use crate::BacklightDevice;
+use crate::monitors::BacklightDevice;
 
 const VCP_FEATURE_BRIGHTNESS: FeatureCode = 0x10;
 

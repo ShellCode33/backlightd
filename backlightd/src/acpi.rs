@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use anyhow::bail;
 
-use crate::BacklightDevice;
+use crate::monitors::BacklightDevice;
 
 pub(crate) const ACPI_DEVICES_PATH: &str = "/sys/class/backlight";
 
