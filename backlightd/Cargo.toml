@@ -7,4 +7,7 @@ edition = "2021"
 ddc-hi = "0.4.1"
 backlight_ipc = { path = "../backlight_ipc" }
 anyhow = "1.0.93"
+sunrise-next = "1.2"
 chrono = "0.4.38"
+ureq = { version = "2.10.1", features = ["json", "proxy-from-env"] }
+serde = "1.0"

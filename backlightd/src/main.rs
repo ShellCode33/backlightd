@@ -8,30 +8,52 @@ use std::{
     thread,
 };
 
+use auto::auto_adjust;
 use backlight_ipc::{BacklightCommand, BacklightMode, DEFAULT_UNIX_SOCKET_PATH};
 use monitors::auto_refresh_monitors_list;
 
 mod acpi;
+mod auto;
 mod ddc;
 mod monitors;
 
 fn handle_commands(
     cmd_receiver: Receiver<BacklightCommand>,
+    auto_adjust_sender: Sender<BacklightMode>,
 ) -> ! {
     loop {
         let command = cmd_receiver
             .recv()
             .expect("Failed to receive command from cmd channel");
         let result = match command {
-            BacklightCommand::SetBrightness(percent) => monitors::set_brightness_percent(percent),
+            BacklightCommand::SetBrightness(percent) => {
+                auto_adjust_sender
+                    .send(BacklightMode::Manual)
+                    .expect("Failed to send BacklightMode through auto adjust channel");
+                monitors::set_brightness_percent(percent)
+            }
             BacklightCommand::IncreaseBrightness(percent) => {
+                auto_adjust_sender
+                    .send(BacklightMode::Manual)
+                    .expect("Failed to send BacklightMode through auto adjust channel");
                 monitors::increase_brightness_percent(percent)
             }
             BacklightCommand::DecreaseBrightness(percent) => {
+                auto_adjust_sender
+                    .send(BacklightMode::Manual)
+                    .expect("Failed to send BacklightMode through auto adjust channel");
                 monitors::decrease_brightness_percent(percent)
             }
             BacklightCommand::Refresh => {
                 monitors::refresh_monitors_list();
+                Ok(())
+            }
+            BacklightCommand::SetMode(backlight_mode) => {
+                auto_adjust_sender
+                    .send(backlight_mode)
+                    .unwrap_or_else(|err| {
+                        eprintln!("Failed to send mode to auto adjust channel: {err}")
+                    });
                 Ok(())
             }
         };
@@ -75,9 +97,11 @@ fn main() {
     };
 
     let (cmd_sender, cmd_receiver) = channel();
+    let (auto_sender, auto_receiver) = channel();
 
-    let command_handler_thread = thread::spawn(move || handle_commands(cmd_receiver));
     let auto_refresh_monitors_thread = thread::spawn(move || auto_refresh_monitors_list());
+    let command_handler_thread = thread::spawn(move || handle_commands(cmd_receiver, auto_sender));
+    let auto_adjust_thread = thread::spawn(move || auto_adjust(auto_receiver));
 
     for stream in listener.incoming() {
         if auto_refresh_monitors_thread.is_finished() {
@@ -86,6 +110,10 @@ fn main() {
 
         if command_handler_thread.is_finished() {
             panic!("command handler thread is gone");
+        }
+
+        if auto_adjust_thread.is_finished() {
+            panic!("auto adjust thread is gone");
         }
 
         let stream = match stream {

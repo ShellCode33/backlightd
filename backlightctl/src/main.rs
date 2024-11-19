@@ -1,7 +1,7 @@
 use std::{os::unix::net::UnixStream, path::PathBuf, process::exit};
 
-use backlight_ipc::{BacklightCommand, DEFAULT_UNIX_SOCKET_PATH};
-use clap::Parser;
+use backlight_ipc::{BacklightCommand, BacklightMode, DEFAULT_UNIX_SOCKET_PATH};
+use clap::{error::ErrorKind, CommandFactory, Parser};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -10,6 +10,10 @@ struct BacklightctlCli {
     #[clap(short, long)]
     #[structopt(allow_hyphen_values = true)]
     brightness: Option<String>,
+
+    /// Set backlightd mode to auto (the daemon will automatically adjust brightness)
+    #[clap(short, long, default_value_t = false)]
+    auto: bool,
 
     /// Refresh the list of known monitors (called by the udev rule)
     #[clap(short, long, default_value_t = false)]
@@ -23,10 +27,23 @@ struct BacklightctlCli {
 fn main() {
     let cli = BacklightctlCli::parse();
 
+    if cli.auto && cli.brightness.is_some() {
+        BacklightctlCli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "You cannot use both --brightness and --auto",
+            )
+            .exit();
+    }
+
     let brightness_cmd = if let Some(brightness) = cli.brightness {
         if brightness.chars().last().is_some_and(|c| c != '%') {
-            eprintln!("Brightness value is missing a % sign at the end");
-            exit(1);
+            BacklightctlCli::command()
+                .error(
+                    ErrorKind::InvalidValue,
+                    "Brightness value is missing a % sign at the end",
+                )
+                .exit();
         }
 
         let potential_brightness_modifier = brightness.chars().next();
@@ -41,14 +58,22 @@ fn main() {
             let brightness = match brightness.parse::<u8>() {
                 Ok(percent) => percent,
                 Err(err) => {
-                    eprintln!("Unable to parse brightness value {brightness}: {err}");
-                    exit(1);
+                    BacklightctlCli::command()
+                        .error(
+                            ErrorKind::InvalidValue,
+                            format!("Unable to parse brightness value {brightness}: {err}"),
+                        )
+                        .exit();
                 }
             };
 
             if brightness > 100 {
-                eprintln!("Brightness value must be a percentage between -100% and 100%");
-                exit(1);
+                BacklightctlCli::command()
+                    .error(
+                        ErrorKind::InvalidValue,
+                        "Brightness value must be a percentage between -100% and 100%",
+                    )
+                    .exit();
             }
 
             Some(BacklightCommand::IncreaseBrightness(brightness))
@@ -62,14 +87,22 @@ fn main() {
             let brightness = match brightness.parse::<usize>() {
                 Ok(percent) => percent,
                 Err(err) => {
-                    eprintln!("Unable to parse brightness value {brightness}: {err}");
-                    exit(1);
+                    BacklightctlCli::command()
+                        .error(
+                            ErrorKind::InvalidValue,
+                            format!("Unable to parse brightness value {brightness}: {err}"),
+                        )
+                        .exit();
                 }
             };
 
             if brightness > 100 {
-                eprintln!("Brightness value must be a percentage between -100% and +100%");
-                exit(1);
+                BacklightctlCli::command()
+                    .error(
+                        ErrorKind::InvalidValue,
+                        "Brightness value must be a percentage between -100% and 100%",
+                    )
+                    .exit();
             }
 
             Some(BacklightCommand::DecreaseBrightness(brightness as u8))
@@ -82,14 +115,22 @@ fn main() {
             let brightness = match brightness.parse::<usize>() {
                 Ok(percent) => percent,
                 Err(err) => {
-                    eprintln!("Unable to parse brightness value {brightness}: {err}");
-                    exit(1);
+                    BacklightctlCli::command()
+                        .error(
+                            ErrorKind::InvalidValue,
+                            format!("Unable to parse brightness value {brightness}: {err}"),
+                        )
+                        .exit();
                 }
             };
 
             if brightness > 100 {
-                eprintln!("Brightness value must be a percentage between -100% and +100%");
-                exit(1);
+                BacklightctlCli::command()
+                    .error(
+                        ErrorKind::InvalidValue,
+                        "Brightness value must be a percentage between -100% and 100%",
+                    )
+                    .exit();
             }
 
             Some(BacklightCommand::SetBrightness(brightness as u8))
@@ -108,6 +149,13 @@ fn main() {
 
     if cli.refresh {
         if let Err(err) = BacklightCommand::Refresh.serialize_into(&stream) {
+            eprintln!("{err}");
+            exit(1);
+        }
+    }
+
+    if cli.auto {
+        if let Err(err) = BacklightCommand::SetMode(BacklightMode::Auto).serialize_into(&stream) {
             eprintln!("{err}");
             exit(1);
         }

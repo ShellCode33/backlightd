@@ -107,7 +107,7 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
 pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
     for monitor in MONITORS.lock().unwrap().iter_mut() {
-        let mut new_brightness = monitor.get_brightness() as isize - percent as isize;
+        let mut new_brightness = monitor.get_brightness() as i8 - percent as i8;
 
         // Don't allow setting the brightness to 0 to prevent the monitor from being completely black.
         if new_brightness < 1 {

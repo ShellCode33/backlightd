@@ -7,12 +7,19 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_UNIX_SOCKET_PATH: &str = "/run/backlightd.sock";
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum BacklightMode {
+    Auto,
+    Manual,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum BacklightCommand {
     SetBrightness(u8),
     IncreaseBrightness(u8),
     DecreaseBrightness(u8),
     Refresh,
+    SetMode(BacklightMode),
 }
 
 // The following abstraction allow us to easily change the protocol if need be.
