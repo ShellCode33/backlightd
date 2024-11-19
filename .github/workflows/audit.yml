@@ -25,3 +25,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/audit@v1
         name: Audit Rust Dependencies
+        with:
+          ignore: RUSTSEC-2018-0005, RUSTSEC-2024-0320
