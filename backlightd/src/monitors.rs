@@ -88,14 +88,30 @@ pub(crate) fn refresh_monitors_list() {
 }
 
 pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
+    let mut last_error = None;
+
     for monitor in MONITORS.lock().unwrap().iter_mut() {
-        monitor.set_brightness(percent)?;
+        let res = monitor.set_brightness(percent);
+
+        if let Err(err) = res {
+            error!("Unable to set brightness of {}", monitor.name());
+            last_error = Some(err);
+        }
     }
-    info!("Brightness of all monitors has been set to {percent}%");
-    Ok(())
+
+    if let Some(err) = last_error {
+        info!("Trying to refresh monitors list to fix the error...");
+        refresh_monitors_list();
+        Err(err)
+    } else {
+        info!("Brightness of all monitors has been set to {percent}%");
+        Ok(())
+    }
 }
 
 pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
+    let mut last_error = None;
+
     for monitor in MONITORS.lock().unwrap().iter_mut() {
         let mut new_brightness = monitor.get_brightness() + percent;
 
@@ -103,12 +119,27 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
             new_brightness = 100;
         }
 
-        monitor.set_brightness(new_brightness)?;
+        let res = monitor.set_brightness(new_brightness);
+
+        if let Err(err) = res {
+            error!("Unable to set brightness of {}", monitor.name());
+            last_error = Some(err);
+        }
     }
-    Ok(())
+
+    if let Some(err) = last_error {
+        info!("Trying to refresh monitors list to fix the error...");
+        refresh_monitors_list();
+        Err(err)
+    } else {
+        info!("Brightness of all monitors has been set to {percent}%");
+        Ok(())
+    }
 }
 
 pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
+    let mut last_error = None;
+
     for monitor in MONITORS.lock().unwrap().iter_mut() {
         let mut new_brightness = monitor.get_brightness() as i8 - percent as i8;
 
@@ -117,7 +148,20 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
             new_brightness = 1;
         }
 
-        monitor.set_brightness(new_brightness as u8)?;
+        let res = monitor.set_brightness(new_brightness as u8);
+
+        if let Err(err) = res {
+            error!("Unable to set brightness of {}: {err}", monitor.name());
+            last_error = Some(err);
+        }
     }
-    Ok(())
+
+    if let Some(err) = last_error {
+        info!("Trying to refresh monitors list to fix the error...");
+        refresh_monitors_list();
+        Err(err)
+    } else {
+        info!("Brightness of all monitors has been set to {percent}%");
+        Ok(())
+    }
 }
