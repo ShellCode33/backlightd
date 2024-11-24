@@ -15,6 +15,7 @@ use monitors::auto_refresh_monitors_list;
 mod acpi;
 mod auto;
 mod ddc;
+mod location;
 mod monitors;
 
 fn handle_commands(

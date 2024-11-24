@@ -1,17 +1,15 @@
 use core::panic;
 use std::{
-    env::{self, VarError},
     sync::mpsc::{Receiver, RecvTimeoutError},
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::anyhow;
 use backlight_ipc::BacklightMode;
 use chrono::{DateTime, Datelike, Local, NaiveTime};
 use sunrise::sunrise_sunset;
-use ureq::serde::Deserialize;
 
-use crate::monitors;
+use crate::{location::find_location, monitors};
 
 const AUTO_ADJUST_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -58,101 +56,6 @@ pub fn auto_adjust(auto_adjust_receiver: Receiver<BacklightMode>) -> ! {
             current_mode = BacklightMode::Auto;
         }
     }
-}
-
-fn find_location_from_config() -> anyhow::Result<(f64, f64)> {
-    let location_str = match env::var("BACKLIGHTD_LOCATION") {
-        Ok(loc) => loc,
-        Err(err) => match err {
-            VarError::NotPresent => return Err(anyhow::Error::new(VarError::NotPresent)),
-            VarError::NotUnicode(str) => {
-                bail!("Invalid environment variable value: {str:?}");
-            }
-        },
-    };
-
-    let (lat, long) = location_str.split_once(',').with_context(|| {
-        "Invalid BACKLIGHTD_LOCATION, expected a comma between latitude and longitude"
-    })?;
-
-    let lat = lat
-        .trim()
-        .parse()
-        .with_context(|| "Unable to parse latitude to float")?;
-
-    let long = long
-        .trim()
-        .parse()
-        .with_context(|| "Unable to parse longitude to float")?;
-
-    Ok((lat, long))
-}
-
-fn find_ip_location() -> anyhow::Result<(f64, f64)> {
-    #[derive(Deserialize)]
-    struct IpApiResponse {
-        status: String,
-        message: Option<String>,
-        country: String,
-        city: String,
-        lat: f64,
-        lon: f64,
-    }
-
-    println!("Trying to get location from public API...");
-    let resp: IpApiResponse =
-        ureq::get("http://ip-api.com/json/?fields=status,message,country,city,lat,lon")
-            .call()?
-            .into_json()?;
-
-    if resp.status != "success" {
-        bail!("Unable to find location by IP: {:?}", resp.message);
-    }
-
-    println!(
-        "Found your location using your IP: {}/{} [{}, {}]",
-        resp.country, resp.city, resp.lat, resp.lon
-    );
-
-    Ok((resp.lat, resp.lon))
-}
-
-fn find_location() -> anyhow::Result<Option<(f64, f64)>> {
-    match find_location_from_config() {
-        Ok(location) => {
-            println!("Using location from configuration: {location:?}");
-            return Ok(Some(location));
-        }
-        Err(err) => match err.downcast_ref::<VarError>() {
-            Some(VarError::NotPresent) => {}
-            _ => bail!("{err}"),
-        },
-    }
-
-    let allow_api_call = match env::var("BACKLIGHTD_ENABLE_LOCATION_API") {
-        Ok(value) => ["1", "y", "yes"].contains(&value.as_ref()),
-        Err(err) => match err {
-            VarError::NotPresent => true,
-            VarError::NotUnicode(str) => {
-                bail!("Invalid environment variable value: {str:?}");
-            }
-        },
-    };
-
-    Ok(if allow_api_call {
-        match find_ip_location() {
-            Ok(location) => Some(location),
-            Err(err) => {
-                eprintln!("Failed to get location using public API: {err}");
-                println!("Fallback to clock based brightness adjustement");
-                None
-            }
-        }
-    } else {
-        println!("Unable to find your location, you might want to configure backlightd or to allow the usage of the public API");
-        println!("Fallback to clock based brightness adjustement");
-        None
-    })
 }
 
 fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> u8 {

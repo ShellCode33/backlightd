@@ -11,3 +11,4 @@ sunrise-next = "1.2"
 chrono = "0.4.38"
 ureq = { version = "2.10.1", features = ["json", "proxy-from-env"] }
 serde = "1.0"
+toml = "0.8.19"
