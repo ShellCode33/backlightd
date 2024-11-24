@@ -42,3 +42,14 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy
+  tests:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libudev-dev
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo test
