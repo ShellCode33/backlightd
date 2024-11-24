@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use log::{error, info};
+
 use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
 
@@ -52,7 +54,7 @@ pub(crate) fn refresh_monitors_list() {
     for ddc_device in ddc_hi::Display::enumerate() {
         match BacklightDdcDevice::new(ddc_device) {
             Ok(monitor) => new_monitors.push(Box::new(monitor)),
-            Err(err) => eprintln!("Failed to retrieve DDC backlight monitor: {err}"),
+            Err(err) => error!("Failed to retrieve DDC backlight monitor: {err}"),
         }
     }
 
@@ -62,16 +64,16 @@ pub(crate) fn refresh_monitors_list() {
                 match entry {
                     Ok(file) => match BacklightAcpiDevice::new(file.path()) {
                         Ok(monitor) => new_monitors.push(Box::new(monitor)),
-                        Err(err) => println!("Failed to retrieve ACPI backlight monitor: {err}"),
+                        Err(err) => error!("Failed to retrieve ACPI backlight monitor: {err}"),
                     },
                     Err(err) => {
-                        eprintln!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
+                        error!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
                     }
                 }
             }
         }
         Err(err) => {
-            eprintln!("{ACPI_DEVICES_PATH}: {err}");
+            error!("{ACPI_DEVICES_PATH}: {err}");
             // fallthrough
         }
     }
@@ -89,6 +91,7 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
     for monitor in MONITORS.lock().unwrap().iter_mut() {
         monitor.set_brightness(percent)?;
     }
+    info!("Brightness of all monitors has been set to {percent}%");
     Ok(())
 }
 

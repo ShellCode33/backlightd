@@ -7,6 +7,7 @@ use std::{
 use anyhow::anyhow;
 use backlight_ipc::BacklightMode;
 use chrono::{DateTime, Datelike, Local, NaiveTime};
+use log::{error, info};
 use sunrise::sunrise_sunset;
 
 use crate::{location::find_location, monitors};
@@ -32,14 +33,14 @@ pub fn auto_adjust(auto_adjust_receiver: Receiver<BacklightMode>) -> ! {
             };
 
             if let Err(err) = result {
-                eprintln!("Unable to set brightness: {err}");
+                error!("Unable to set brightness: {err}");
             }
         }
 
         match auto_adjust_receiver.recv_timeout(AUTO_ADJUST_INTERVAL) {
             Ok(new_mode) => {
                 if new_mode != current_mode {
-                    println!("Set backlightd mode to {new_mode:?}");
+                    info!("Set backlightd mode to {new_mode:?}");
                 }
                 last_time_mode_was_changed = Instant::now();
                 current_mode = new_mode;

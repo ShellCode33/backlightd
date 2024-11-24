@@ -10,6 +10,7 @@ use std::{
 
 use auto::auto_adjust;
 use backlight_ipc::{BacklightCommand, BacklightMode, DEFAULT_UNIX_SOCKET_PATH};
+use log::error;
 use monitors::auto_refresh_monitors_list;
 
 mod acpi;
@@ -53,19 +54,24 @@ fn handle_commands(
                 auto_adjust_sender
                     .send(backlight_mode)
                     .unwrap_or_else(|err| {
-                        eprintln!("Failed to send mode to auto adjust channel: {err}")
+                        error!("Failed to send mode to auto adjust channel: {err}")
                     });
                 Ok(())
             }
         };
 
         if let Err(err) = result {
-            eprintln!("Command handling failed: {err}");
+            error!("Command handling failed: {err}");
         }
     }
 }
 
 fn main() {
+    pretty_env_logger::formatted_builder()
+        .filter_level(log::LevelFilter::Info)
+        .parse_env("BACKLIGHTD_LOG_LEVEL")
+        .init();
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 1 && args.len() != 3 {
@@ -84,7 +90,7 @@ fn main() {
 
     if let Err(err) = remove_file(unix_socket_path) {
         if !matches!(err.kind(), io::ErrorKind::NotFound) {
-            eprintln!("{unix_socket_path}: {err}");
+            error!("{unix_socket_path}: {err}");
             exit(1);
         }
     }
@@ -92,7 +98,7 @@ fn main() {
     let listener = match UnixListener::bind(unix_socket_path) {
         Ok(listener) => listener,
         Err(err) => {
-            eprintln!("{unix_socket_path}: {err}");
+            error!("{unix_socket_path}: {err}");
             exit(1);
         }
     };
@@ -120,7 +126,7 @@ fn main() {
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
-                eprintln!("A client tried to connect but something wrong happened: {err}");
+                error!("A client tried to connect but something wrong happened: {err}");
                 continue;
             }
         };
@@ -130,7 +136,7 @@ fn main() {
                 cmd_sender.send(command).unwrap();
             }
             Err(err) => {
-                eprintln!("Unable to deserialize command: {err}");
+                error!("Unable to deserialize command: {err}");
             }
         }
     }
