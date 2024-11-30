@@ -4,7 +4,7 @@ Description=A backlight daemon that allows you to manage the backlight of all ki
 [Service]
 Type=simple
 Restart=always
-ExecStart=/usr/bin/backlightd
+ExecStart=$INSTALL_PREFIX/backlightd
 ProtectSystem=strict
 ReadWritePaths=/var/cache /run
 ProtectHome=tmpfs
