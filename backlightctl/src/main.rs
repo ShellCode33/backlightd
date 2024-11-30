@@ -22,6 +22,10 @@ struct BacklightctlCli {
     /// UNIX socket path (for test purposes)
     #[clap(short, long, default_value = DEFAULT_UNIX_SOCKET_PATH)]
     unix_socket_path: PathBuf,
+
+    /// Output will be JSON
+    #[clap(long, default_value_t = false)]
+    json: bool,
 }
 
 fn main() {
@@ -166,5 +170,41 @@ fn main() {
             eprintln!("{err}");
             exit(1);
         }
+    }
+
+    if let Err(err) = BacklightCommand::GetInfo.serialize_into(&stream) {
+        eprintln!("{err}");
+        exit(1);
+    }
+
+    let backlight_info = match BacklightCommand::deserialize_from(&stream) {
+        Ok(BacklightCommand::GetInfoResponse(info)) => info,
+        Ok(cmd) => {
+            eprintln!("Unexpected response: {cmd:?}");
+            exit(1);
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            exit(1);
+        }
+    };
+
+    if cli.json {
+        match serde_json::to_string(&backlight_info) {
+            Ok(backlight_info_json) => {
+                println!("{backlight_info_json}");
+            }
+            Err(err) => {
+                eprintln!("Cannot serialize GetInfoResponse to json: {err}");
+                exit(1);
+            }
+        }
+    } else {
+        println!("Current brightness: {}%", backlight_info.brightness_percent);
+    }
+
+    if let Err(err) = BacklightCommand::NotifyShutdown.serialize_into(&stream) {
+        eprintln!("{err}");
+        exit(1);
     }
 }

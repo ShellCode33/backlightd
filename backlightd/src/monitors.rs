@@ -165,3 +165,14 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
         Ok(())
     }
 }
+
+pub(crate) fn get_average_brightness() -> u8 {
+    let monitors = MONITORS.lock().unwrap();
+    let mut sum: usize = 0;
+
+    for monitor in &*monitors {
+        sum += monitor.get_brightness() as usize;
+    }
+
+    (sum / monitors.len()) as u8
+}

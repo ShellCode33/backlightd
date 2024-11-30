@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.21", features = ["derive"] }
 backlight_ipc = { path = "../backlight_ipc" }
+serde_json = "1.0"

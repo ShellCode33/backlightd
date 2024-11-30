@@ -14,12 +14,20 @@ pub enum BacklightMode {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct BacklightInfo {
+    pub brightness_percent: u8,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub enum BacklightCommand {
     SetBrightness(u8),
     IncreaseBrightness(u8),
     DecreaseBrightness(u8),
     Refresh,
     SetMode(BacklightMode),
+    GetInfo,
+    GetInfoResponse(BacklightInfo),
+    NotifyShutdown,
 }
 
 // The following abstraction allow us to easily change the protocol if need be.
