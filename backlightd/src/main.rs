@@ -161,6 +161,8 @@ fn handle_client(
                 Ok(())
             }
             BacklightCommand::NotifyShutdown => break,
+            BacklightCommand::TurnOffMonitors => monitors::turn_off(),
+            BacklightCommand::TurnOnMonitors => monitors::turn_on(),
         };
 
         if let Err(err) = result {

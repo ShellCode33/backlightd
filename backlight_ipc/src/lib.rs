@@ -23,6 +23,8 @@ pub enum BacklightCommand {
     SetBrightness(u8),
     IncreaseBrightness(u8),
     DecreaseBrightness(u8),
+    TurnOffMonitors,
+    TurnOnMonitors,
     Refresh,
     SetMode(BacklightMode),
     GetInfo,

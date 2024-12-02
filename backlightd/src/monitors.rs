@@ -24,6 +24,8 @@ pub(crate) trait BacklightDevice {
     fn name(&self) -> String;
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()>;
     fn get_brightness(&self) -> u8;
+    fn turn_off(&mut self) -> anyhow::Result<()>;
+    fn turn_on(&mut self) -> anyhow::Result<()>;
 }
 
 pub(crate) fn auto_refresh_monitors_list() -> ! {
@@ -160,6 +162,70 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
+        Ok(())
+    }
+}
+
+pub(crate) fn turn_off() -> anyhow::Result<()> {
+    let mut last_error = None;
+
+    for monitor in MONITORS.lock().unwrap().iter_mut() {
+        if let Err(err) = monitor.turn_off() {
+            log::error!("Unable to turn OFF monitor: {err}");
+            last_error = Some(err);
+        }
+    }
+
+    if last_error.is_some() {
+        log::info!("Trying to refresh monitors list to fix the error and retry...");
+        refresh_monitors_list();
+
+        last_error = None;
+        for monitor in MONITORS.lock().unwrap().iter_mut() {
+            if let Err(err) = monitor.turn_off() {
+                log::error!("Unable to turn OFF monitor: {err}");
+                last_error = Some(err);
+            }
+        }
+
+        if let Some(err) = last_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn turn_on() -> anyhow::Result<()> {
+    let mut last_error = None;
+
+    for monitor in MONITORS.lock().unwrap().iter_mut() {
+        if let Err(err) = monitor.turn_on() {
+            log::error!("Unable to turn ON monitor: {err}");
+            last_error = Some(err);
+        }
+    }
+
+    if last_error.is_some() {
+        log::info!("Trying to refresh monitors list to fix the error and retry...");
+        refresh_monitors_list();
+
+        last_error = None;
+        for monitor in MONITORS.lock().unwrap().iter_mut() {
+            if let Err(err) = monitor.turn_on() {
+                log::error!("Unable to turn ON monitor: {err}");
+                last_error = Some(err);
+            }
+        }
+
+        if let Some(err) = last_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    } else {
         Ok(())
     }
 }

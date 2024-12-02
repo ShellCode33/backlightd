@@ -15,6 +15,14 @@ struct BacklightctlCli {
     #[clap(short, long, default_value_t = false)]
     auto: bool,
 
+    /// Turn off monitors
+    #[clap(long, default_value_t = false)]
+    turn_off: bool,
+
+    /// Turn on monitors
+    #[clap(long, default_value_t = false)]
+    turn_on: bool,
+
     /// Refresh the list of known monitors (called by the udev rule)
     #[clap(short, long, default_value_t = false)]
     refresh: bool,
@@ -36,6 +44,15 @@ fn main() {
             .error(
                 ErrorKind::ArgumentConflict,
                 "You cannot use both --brightness and --auto",
+            )
+            .exit();
+    }
+
+    if cli.turn_on && cli.turn_off {
+        BacklightctlCli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "You cannot use both --turn-on and --turn-off",
             )
             .exit();
     }
@@ -163,10 +180,20 @@ fn main() {
             eprintln!("{err}");
             exit(1);
         }
+    } else if let Some(brightness_cmd) = brightness_cmd {
+        if let Err(err) = brightness_cmd.serialize_into(&stream) {
+            eprintln!("{err}");
+            exit(1);
+        }
     }
 
-    if let Some(brightness_cmd) = brightness_cmd {
-        if let Err(err) = brightness_cmd.serialize_into(&stream) {
+    if cli.turn_off {
+        if let Err(err) = BacklightCommand::TurnOffMonitors.serialize_into(&stream) {
+            eprintln!("{err}");
+            exit(1);
+        }
+    } else if cli.turn_on {
+        if let Err(err) = BacklightCommand::TurnOnMonitors.serialize_into(&stream) {
             eprintln!("{err}");
             exit(1);
         }

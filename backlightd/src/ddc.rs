@@ -1,3 +1,5 @@
+/// The bible for DDC:
+/// https://milek7.pl/ddcbacklight/mccs.pdf
 use std::error::Error;
 
 use anyhow::bail;
@@ -6,6 +8,9 @@ use ddc_hi::{Ddc, Display, FeatureCode};
 use crate::monitors::BacklightDevice;
 
 const VCP_FEATURE_BRIGHTNESS: FeatureCode = 0x10;
+const VCP_FEATURE_POWER: FeatureCode = 0xD6;
+const VCP_VALUE_POWER_ON: u16 = 0x1;
+const VCP_VALUE_POWER_OFF: u16 = 0x4;
 
 pub(crate) struct BacklightDdcDevice {
     display: Display,
@@ -56,5 +61,29 @@ impl BacklightDevice for BacklightDdcDevice {
             .model_name
             .clone()
             .unwrap_or(String::from("Unknown"))
+    }
+
+    fn turn_off(&mut self) -> anyhow::Result<()> {
+        if let Err(err) = self
+            .display
+            .handle
+            .set_vcp_feature(VCP_FEATURE_POWER, VCP_VALUE_POWER_OFF)
+        {
+            bail!("{}: {err}", self.name());
+        }
+
+        Ok(())
+    }
+
+    fn turn_on(&mut self) -> anyhow::Result<()> {
+        if let Err(err) = self
+            .display
+            .handle
+            .set_vcp_feature(VCP_FEATURE_POWER, VCP_VALUE_POWER_ON)
+        {
+            bail!("{}: {err}", self.name());
+        }
+
+        Ok(())
     }
 }

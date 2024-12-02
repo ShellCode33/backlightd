@@ -65,4 +65,12 @@ impl BacklightDevice for BacklightAcpiDevice {
         // It's ok to unwrap here, if there is no filename it means the developer did something wrong.
         self.path.file_name().unwrap().to_string_lossy().to_string()
     }
+
+    fn turn_off(&mut self) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    fn turn_on(&mut self) -> anyhow::Result<()> {
+        todo!()
+    }
 }
