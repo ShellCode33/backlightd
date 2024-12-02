@@ -232,6 +232,11 @@ pub(crate) fn turn_on() -> anyhow::Result<()> {
 
 pub(crate) fn get_average_brightness() -> u8 {
     let monitors = MONITORS.lock().unwrap();
+
+    if monitors.is_empty() {
+        return 0;
+    }
+
     let mut sum: usize = 0;
 
     for monitor in &*monitors {
