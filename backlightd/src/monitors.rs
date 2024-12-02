@@ -5,8 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use log::{error, info};
-
 use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
 
@@ -54,7 +52,7 @@ pub(crate) fn refresh_monitors_list() {
     for ddc_device in ddc_hi::Display::enumerate() {
         match BacklightDdcDevice::new(ddc_device) {
             Ok(monitor) => new_monitors.push(Box::new(monitor)),
-            Err(err) => error!("Failed to retrieve DDC backlight monitor: {err}"),
+            Err(err) => log::error!("Failed to retrieve DDC backlight monitor: {err}"),
         }
     }
 
@@ -64,16 +62,16 @@ pub(crate) fn refresh_monitors_list() {
                 match entry {
                     Ok(file) => match BacklightAcpiDevice::new(file.path()) {
                         Ok(monitor) => new_monitors.push(Box::new(monitor)),
-                        Err(err) => error!("Failed to retrieve ACPI backlight monitor: {err}"),
+                        Err(err) => log::error!("Failed to retrieve ACPI backlight monitor: {err}"),
                     },
                     Err(err) => {
-                        error!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
+                        log::error!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
                     }
                 }
             }
         }
         Err(err) => {
-            error!("{ACPI_DEVICES_PATH}: {err}");
+            log::error!("{ACPI_DEVICES_PATH}: {err}");
             // fallthrough
         }
     }
@@ -94,17 +92,17 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
         let res = monitor.set_brightness(percent);
 
         if let Err(err) = res {
-            error!("Unable to set brightness of {}", monitor.name());
+            log::error!("Unable to set brightness of {}", monitor.name());
             last_error = Some(err);
         }
     }
 
     if let Some(err) = last_error {
-        info!("Trying to refresh monitors list to fix the error...");
+        log::info!("Trying to refresh monitors list to fix the error...");
         refresh_monitors_list();
         Err(err)
     } else {
-        info!("Brightness of all monitors has been set to {percent}%");
+        log::info!("Brightness of all monitors has been set to {percent}%");
         Ok(())
     }
 }
@@ -122,17 +120,17 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
         let res = monitor.set_brightness(new_brightness);
 
         if let Err(err) = res {
-            error!("Unable to set brightness of {}", monitor.name());
+            log::error!("Unable to set brightness of {}", monitor.name());
             last_error = Some(err);
         }
     }
 
     if let Some(err) = last_error {
-        info!("Trying to refresh monitors list to fix the error...");
+        log::info!("Trying to refresh monitors list to fix the error...");
         refresh_monitors_list();
         Err(err)
     } else {
-        info!("Brightness of all monitors has been set to {percent}%");
+        log::info!("Brightness of all monitors has been set to {percent}%");
         Ok(())
     }
 }
@@ -151,17 +149,17 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
         let res = monitor.set_brightness(new_brightness as u8);
 
         if let Err(err) = res {
-            error!("Unable to set brightness of {}: {err}", monitor.name());
+            log::error!("Unable to set brightness of {}: {err}", monitor.name());
             last_error = Some(err);
         }
     }
 
     if let Some(err) = last_error {
-        info!("Trying to refresh monitors list to fix the error...");
+        log::info!("Trying to refresh monitors list to fix the error...");
         refresh_monitors_list();
         Err(err)
     } else {
-        info!("Brightness of all monitors has been set to {percent}%");
+        log::info!("Brightness of all monitors has been set to {percent}%");
         Ok(())
     }
 }
