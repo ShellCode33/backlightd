@@ -71,30 +71,37 @@ fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> u8 {
         .into();
 
     compute_brightness_percentage(
-        now.time(),
-        sunrise_datetime.time(),
-        sunrise_datetime.time() + BRIGHTNESS_TRANSITION_DURATION,
-        sunset_datetime.time(),
-        sunset_datetime.time() + BRIGHTNESS_TRANSITION_DURATION,
+        now,
+        sunrise_datetime,
+        sunrise_datetime + BRIGHTNESS_TRANSITION_DURATION,
+        sunset_datetime,
+        sunset_datetime + BRIGHTNESS_TRANSITION_DURATION,
     )
 }
 
 fn get_brightness_based_on_time() -> u8 {
+    let now = Local::now();
     compute_brightness_percentage(
-        Local::now().time(),
-        FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap(),
-        FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap() + BRIGHTNESS_TRANSITION_DURATION,
-        FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap(),
-        FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap() + BRIGHTNESS_TRANSITION_DURATION,
+        now,
+        now.with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
+            .unwrap(),
+        now.with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
+            .unwrap()
+            + BRIGHTNESS_TRANSITION_DURATION,
+        now.with_time(FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap())
+            .unwrap(),
+        now.with_time(FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap())
+            .unwrap()
+            + BRIGHTNESS_TRANSITION_DURATION,
     )
 }
 
 fn compute_brightness_percentage(
-    now: NaiveTime,
-    brightness_up_begin: NaiveTime,
-    brightness_up_end: NaiveTime,
-    brightness_down_begin: NaiveTime,
-    brightness_down_end: NaiveTime,
+    now: DateTime<Local>,
+    brightness_up_begin: DateTime<Local>,
+    brightness_up_end: DateTime<Local>,
+    brightness_down_begin: DateTime<Local>,
+    brightness_down_end: DateTime<Local>,
 ) -> u8 {
     assert!(brightness_up_begin < brightness_up_end);
     assert!(brightness_up_end < brightness_down_begin);
@@ -125,15 +132,21 @@ mod tests {
 
     #[test]
     fn test_fallback() {
-        let brightness_up_begin = FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap();
+        let now = Local::now();
+        let brightness_up_begin = now
+            .with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
+            .unwrap();
         let brightness_up_end = brightness_up_begin + BRIGHTNESS_TRANSITION_DURATION;
-        let brightness_down_begin = FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap();
+        let brightness_down_begin = now
+            .with_time(FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap())
+            .unwrap();
         let brightness_down_end = brightness_down_begin + BRIGHTNESS_TRANSITION_DURATION;
 
         for i in 0..=brightness_up_begin.hour() {
             assert_eq!(
                 compute_brightness_percentage(
-                    NaiveTime::from_hms_opt(i, 0, 0).unwrap(),
+                    now.with_time(NaiveTime::from_hms_opt(i, 0, 0).unwrap())
+                        .unwrap(),
                     brightness_up_begin,
                     brightness_up_end,
                     brightness_down_begin,
@@ -146,7 +159,8 @@ mod tests {
         for i in brightness_up_end.hour()..=brightness_down_begin.hour() {
             assert_eq!(
                 compute_brightness_percentage(
-                    NaiveTime::from_hms_opt(i, 0, 0).unwrap(),
+                    now.with_time(NaiveTime::from_hms_opt(i, 0, 0).unwrap())
+                        .unwrap(),
                     brightness_up_begin,
                     brightness_up_end,
                     brightness_down_begin,
@@ -159,7 +173,8 @@ mod tests {
         for i in brightness_down_end.hour()..=23 {
             assert_eq!(
                 compute_brightness_percentage(
-                    NaiveTime::from_hms_opt(i, 0, 0).unwrap(),
+                    now.with_time(NaiveTime::from_hms_opt(i, 0, 0).unwrap())
+                        .unwrap(),
                     brightness_up_begin,
                     brightness_up_end,
                     brightness_down_begin,
@@ -172,10 +187,19 @@ mod tests {
 
     #[test]
     fn test_exact_transition_points() {
-        let brightness_up_begin = NaiveTime::from_hms_opt(6, 7, 8).unwrap();
-        let brightness_up_end = NaiveTime::from_hms_opt(7, 8, 9).unwrap();
-        let brightness_down_begin = NaiveTime::from_hms_opt(19, 18, 17).unwrap();
-        let brightness_down_end = NaiveTime::from_hms_opt(20, 19, 18).unwrap();
+        let now = Local::now();
+        let brightness_up_begin = now
+            .with_time(NaiveTime::from_hms_opt(6, 7, 8).unwrap())
+            .unwrap();
+        let brightness_up_end = now
+            .with_time(NaiveTime::from_hms_opt(7, 8, 9).unwrap())
+            .unwrap();
+        let brightness_down_begin = now
+            .with_time(NaiveTime::from_hms_opt(19, 18, 17).unwrap())
+            .unwrap();
+        let brightness_down_end = now
+            .with_time(NaiveTime::from_hms_opt(20, 19, 18).unwrap())
+            .unwrap();
 
         assert_eq!(
             compute_brightness_percentage(
