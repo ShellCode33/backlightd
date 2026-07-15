@@ -1,11 +1,12 @@
 use core::panic;
 use std::{
     sync::mpsc::{Receiver, RecvTimeoutError},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::anyhow;
 use backlight_ipc::BacklightMode;
+use boot_time::Instant;
 use chrono::{DateTime, Datelike, Local, NaiveTime};
 use log::{error, info};
 use sunrise::sunrise_sunset;

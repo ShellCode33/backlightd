@@ -2,8 +2,10 @@ use std::{
     fs::{self},
     sync::Mutex,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use boot_time::Instant;
 
 use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
