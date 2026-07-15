@@ -15,7 +15,7 @@ target/release/backlightctl: backlightctl/Cargo.toml $(shell ls -1 backlightctl/
 install:
 	install -Dm 755 -t $(INSTALL_PREFIX) target/release/backlightd
 	install -Dm 755 -t $(INSTALL_PREFIX) target/release/backlightctl
-	install -Dm 755 -t /etc/systemd/system backlightd.service
+	install -Dm 644 -t /etc/systemd/system backlightd.service
 	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' /etc/systemd/system/backlightd.service
 	systemctl daemon-reload
 	systemctl enable backlightd
