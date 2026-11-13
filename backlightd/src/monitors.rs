@@ -17,7 +17,8 @@ pub(crate) trait BacklightDevice {
     fn turn_on(&mut self) -> anyhow::Result<()>;
 }
 
-pub(crate) fn refresh_monitors_list(reason: &str) {
+pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
+    let mut failures = 0;
     let started = Instant::now();
     log::debug!("Discovery started: reason={reason}");
     // Called only by the controller, including recovery after device errors.
@@ -41,7 +42,10 @@ pub(crate) fn refresh_monitors_list(reason: &str) {
         );
         match result {
             Ok(monitor) => new_monitors.push(Box::new(monitor)),
-            Err(err) => log::error!("Failed to retrieve DDC backlight monitor: {err}"),
+            Err(err) => {
+                failures += 1;
+                log::error!("Failed to retrieve DDC backlight monitor id={id}: {err}");
+            }
         }
     }
 
@@ -63,19 +67,22 @@ pub(crate) fn refresh_monitors_list(reason: &str) {
                         match result {
                             Ok(monitor) => new_monitors.push(Box::new(monitor)),
                             Err(err) => {
+                                failures += 1;
                                 log::error!("Failed to retrieve ACPI backlight monitor: {err}")
                             }
                         }
                     }
                     Err(err) => {
+                        failures += 1;
                         log::error!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
                     }
                 }
             }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
+            failures += 1;
             log::error!("{ACPI_DEVICES_PATH}: {err}");
-            // fallthrough
         }
     }
 
@@ -87,10 +94,21 @@ pub(crate) fn refresh_monitors_list(reason: &str) {
     monitors.clear();
     monitors.extend(new_monitors);
     log::debug!(
-        "Discovery finished: reason={reason} monitors={} elapsed_ms={}",
+        "Discovery finished: reason={reason} monitors={} failed={failures} elapsed_ms={}",
         monitors.len(),
         started.elapsed().as_millis()
     );
+    anyhow::ensure!(
+        failures == 0,
+        "Discovery incomplete: {failures} probe(s) failed"
+    );
+    Ok(())
+}
+
+fn refresh_after_error(reason: &str) {
+    if let Err(err) = refresh_monitors_list(reason) {
+        log::warn!("Recovery discovery incomplete: {err}");
+    }
 }
 
 // Use widened integer arithmetic for device scales up to u16::MAX.
@@ -128,7 +146,7 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_monitors_list("set_brightness_error");
+        refresh_after_error("set_brightness_error");
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -159,7 +177,7 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_monitors_list("increase_brightness_error");
+        refresh_after_error("increase_brightness_error");
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -190,7 +208,7 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_monitors_list("decrease_brightness_error");
+        refresh_after_error("decrease_brightness_error");
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -210,7 +228,7 @@ pub(crate) fn turn_off() -> anyhow::Result<()> {
 
     if last_error.is_some() {
         log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_monitors_list("turn_off_error");
+        refresh_after_error("turn_off_error");
 
         last_error = None;
         for monitor in MONITORS.lock().unwrap().iter_mut() {
@@ -242,7 +260,7 @@ pub(crate) fn turn_on() -> anyhow::Result<()> {
 
     if last_error.is_some() {
         log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_monitors_list("turn_on_error");
+        refresh_after_error("turn_on_error");
 
         last_error = None;
         for monitor in MONITORS.lock().unwrap().iter_mut() {

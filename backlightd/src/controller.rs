@@ -36,8 +36,7 @@ impl Devices for Monitors {
         }
     }
     fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
-        monitors::refresh_monitors_list(reason);
-        Ok(())
+        monitors::refresh_monitors_list(reason)
     }
     fn brightness(&self) -> u8 {
         monitors::get_average_brightness()
@@ -90,13 +89,13 @@ impl<D: Devices> Controller<D> {
         let discovery_elapsed = started.elapsed();
         self.refresh_deadline = Instant::now() + REFRESH_INTERVAL;
         let adjustment_started = std::time::Instant::now();
-        let result = result.and_then(|()| {
-            if self.mode == BacklightMode::Auto {
-                self.adjust()
-            } else {
-                Ok(())
-            }
-        });
+        // Valid monitors still receive the auto target after a partial scan.
+        let adjustment = if self.mode == BacklightMode::Auto {
+            self.adjust()
+        } else {
+            Ok(())
+        };
+        let result = result.and(adjustment);
         self.last_refresh_error = result.as_ref().err().map(ToString::to_string);
         log::debug!("Refresh finished: reason={reason} mode={} success={} discovery_ms={} adjustment_ms={} total_ms={}", self.mode, result.is_ok(), discovery_elapsed.as_millis(), adjustment_started.elapsed().as_millis(), started.elapsed().as_millis());
         result
@@ -202,6 +201,7 @@ mod tests {
         hardware_brightness: u8,
         refreshes: usize,
         fail: bool,
+        partial_refresh: bool,
         writes: Vec<u8>,
     }
     impl Devices for Fake {
@@ -232,7 +232,11 @@ mod tests {
             Ok(())
         }
         fn refresh(&mut self, _reason: &str) -> anyhow::Result<()> {
-            self.execute(BacklightCommand::Refresh)
+            self.execute(BacklightCommand::Refresh)?;
+            if self.partial_refresh {
+                bail!("Discovery incomplete: 1 probe failed");
+            }
+            Ok(())
         }
         fn brightness(&self) -> u8 {
             self.brightness
@@ -247,11 +251,31 @@ mod tests {
             hardware_brightness: 50,
             refreshes: 0,
             fail: false,
+            partial_refresh: false,
             writes: vec![],
         });
         c.adjust().unwrap();
         c
     }
+    #[test]
+    fn partial_refresh_reports_failure_but_adjusts_valid_monitors() {
+        let mut c = controller();
+        c.devices.partial_refresh = true;
+        c.devices.hardware_brightness = 10;
+        let received_at = Instant::now();
+        assert!(c.refresh("test").is_err());
+        assert_eq!(c.devices.hardware_brightness, 50);
+        assert!(c
+            .last_refresh_error
+            .as_ref()
+            .unwrap()
+            .contains("incomplete"));
+        assert!(c
+            .command_at(BacklightCommand::Refresh, received_at)
+            .is_err());
+        assert_eq!(c.devices.refreshes, 1);
+    }
+
     #[test]
     fn queued_refreshes_are_coalesced_without_losing_later_events() {
         let mut c = controller();
