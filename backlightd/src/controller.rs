@@ -17,6 +17,7 @@ pub(crate) struct Request {
 
 trait Devices {
     fn execute(&mut self, command: BacklightCommand) -> anyhow::Result<()>;
+    fn refresh(&mut self, reason: &str) -> anyhow::Result<()>;
     fn brightness(&self) -> u8;
     fn automatic(&mut self) -> anyhow::Result<(u8, Duration)>;
 }
@@ -28,14 +29,14 @@ impl Devices for Monitors {
             BacklightCommand::SetBrightness(p) => monitors::set_brightness_percent(p),
             BacklightCommand::IncreaseBrightness(p) => monitors::increase_brightness_percent(p),
             BacklightCommand::DecreaseBrightness(p) => monitors::decrease_brightness_percent(p),
-            BacklightCommand::Refresh => {
-                monitors::refresh_monitors_list();
-                Ok(())
-            }
             BacklightCommand::TurnOffMonitors => monitors::turn_off(),
             BacklightCommand::TurnOnMonitors => monitors::turn_on(),
             _ => bail!("Unsupported device command"),
         }
+    }
+    fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+        monitors::refresh_monitors_list(reason);
+        Ok(())
     }
     fn brightness(&self) -> u8 {
         monitors::get_average_brightness()
@@ -77,19 +78,26 @@ impl<D: Devices> Controller<D> {
         self.adjust()
     }
 
-    fn refresh(&mut self) -> anyhow::Result<()> {
-        let result = self.devices.execute(BacklightCommand::Refresh);
+    fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let result = self.devices.refresh(reason);
+        let discovery_elapsed = started.elapsed();
         self.refresh_deadline = Instant::now() + REFRESH_INTERVAL;
-        result?;
-        if self.mode == BacklightMode::Auto {
-            self.adjust()?;
-        }
-        Ok(())
+        let adjustment_started = std::time::Instant::now();
+        let result = result.and_then(|()| {
+            if self.mode == BacklightMode::Auto {
+                self.adjust()
+            } else {
+                Ok(())
+            }
+        });
+        log::debug!("Refresh finished: reason={reason} mode={} success={} discovery_ms={} adjustment_ms={} total_ms={}", self.mode, result.is_ok(), discovery_elapsed.as_millis(), adjustment_started.elapsed().as_millis(), started.elapsed().as_millis());
+        result
     }
 
     fn service_deadlines(&mut self) {
         if Instant::now() >= self.refresh_deadline {
-            if let Err(err) = self.refresh() {
+            if let Err(err) = self.refresh("scheduled") {
                 log::error!("Monitor refresh failed: {err}");
             }
         }
@@ -123,7 +131,7 @@ impl<D: Devices> Controller<D> {
                 }
             }
             BacklightCommand::GetInfo => {}
-            BacklightCommand::Refresh => self.refresh()?,
+            BacklightCommand::Refresh => self.refresh("requested")?,
             BacklightCommand::TurnOnMonitors | BacklightCommand::TurnOffMonitors => {
                 self.devices.execute(command)?
             }
@@ -138,7 +146,7 @@ impl<D: Devices> Controller<D> {
 
 pub(crate) fn run_controller(receiver: Receiver<Request>) -> anyhow::Result<()> {
     let mut controller = Controller::new(Monitors);
-    if let Err(err) = controller.refresh() {
+    if let Err(err) = controller.refresh("startup") {
         log::error!("Initial monitor refresh failed: {err}");
     }
     loop {
@@ -190,6 +198,9 @@ mod tests {
                 _ => {}
             }
             Ok(())
+        }
+        fn refresh(&mut self, _reason: &str) -> anyhow::Result<()> {
+            self.execute(BacklightCommand::Refresh)
         }
         fn brightness(&self) -> u8 {
             self.brightness

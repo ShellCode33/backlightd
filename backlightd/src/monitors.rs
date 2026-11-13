@@ -1,4 +1,4 @@
-use std::{fs, sync::Mutex};
+use std::{fs, sync::Mutex, time::Instant};
 
 use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
@@ -17,25 +17,56 @@ pub(crate) trait BacklightDevice {
     fn turn_on(&mut self) -> anyhow::Result<()>;
 }
 
-pub(crate) fn refresh_monitors_list() {
+pub(crate) fn refresh_monitors_list(reason: &str) {
+    let started = Instant::now();
+    log::debug!("Discovery started: reason={reason}");
     // Called only by the controller, including recovery after device errors.
     let mut new_monitors: Vec<Box<dyn BacklightDevice + Send>> = Vec::new();
 
-    for ddc_device in ddc_hi::Display::enumerate() {
-        match BacklightDdcDevice::new(ddc_device) {
+    let enumeration_started = Instant::now();
+    let displays = ddc_hi::Display::enumerate();
+    log::debug!(
+        "Discovery stage=ddc_enumeration candidates={} elapsed_ms={}",
+        displays.len(),
+        enumeration_started.elapsed().as_millis()
+    );
+    for ddc_device in displays {
+        let id = ddc_device.info.id.clone();
+        let device_started = Instant::now();
+        let result = BacklightDdcDevice::new(ddc_device);
+        log::debug!(
+            "Discovery stage=ddc_initialization id={id} success={} elapsed_ms={}",
+            result.is_ok(),
+            device_started.elapsed().as_millis()
+        );
+        match result {
             Ok(monitor) => new_monitors.push(Box::new(monitor)),
             Err(err) => log::error!("Failed to retrieve DDC backlight monitor: {err}"),
         }
     }
 
+    let acpi_started = Instant::now();
     match fs::read_dir(ACPI_DEVICES_PATH) {
         Ok(dir) => {
             for entry in dir {
                 match entry {
-                    Ok(file) => match BacklightAcpiDevice::new(file.path()) {
-                        Ok(monitor) => new_monitors.push(Box::new(monitor)),
-                        Err(err) => log::error!("Failed to retrieve ACPI backlight monitor: {err}"),
-                    },
+                    Ok(file) => {
+                        let path = file.path();
+                        let device_started = Instant::now();
+                        let result = BacklightAcpiDevice::new(path.clone());
+                        log::debug!(
+                            "Discovery stage=acpi_initialization path={} success={} elapsed_ms={}",
+                            path.display(),
+                            result.is_ok(),
+                            device_started.elapsed().as_millis()
+                        );
+                        match result {
+                            Ok(monitor) => new_monitors.push(Box::new(monitor)),
+                            Err(err) => {
+                                log::error!("Failed to retrieve ACPI backlight monitor: {err}")
+                            }
+                        }
+                    }
                     Err(err) => {
                         log::error!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
                     }
@@ -48,9 +79,18 @@ pub(crate) fn refresh_monitors_list() {
         }
     }
 
+    log::debug!(
+        "Discovery stage=acpi_scan elapsed_ms={}",
+        acpi_started.elapsed().as_millis()
+    );
     let mut monitors = MONITORS.lock().expect("Unable to acquire MONITORS mutex");
     monitors.clear();
     monitors.extend(new_monitors);
+    log::debug!(
+        "Discovery finished: reason={reason} monitors={} elapsed_ms={}",
+        monitors.len(),
+        started.elapsed().as_millis()
+    );
 }
 
 // Use widened integer arithmetic for device scales up to u16::MAX.
@@ -71,7 +111,14 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
 
     for monitor in MONITORS.lock().unwrap().iter_mut() {
+        let write_started = Instant::now();
         let res = monitor.set_brightness(percent);
+        log::debug!(
+            "Brightness write: monitor={} target_percent={percent} success={} elapsed_ms={}",
+            monitor.name(),
+            res.is_ok(),
+            write_started.elapsed().as_millis()
+        );
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}", monitor.name());
@@ -81,7 +128,7 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_monitors_list();
+        refresh_monitors_list("set_brightness_error");
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -95,7 +142,14 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
     for monitor in MONITORS.lock().unwrap().iter_mut() {
         let new_brightness = monitor.get_brightness().saturating_add(percent).min(100);
 
+        let write_started = Instant::now();
         let res = monitor.set_brightness(new_brightness);
+        log::debug!(
+            "Brightness write: monitor={} target_percent={new_brightness} success={} elapsed_ms={}",
+            monitor.name(),
+            res.is_ok(),
+            write_started.elapsed().as_millis()
+        );
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}", monitor.name());
@@ -105,7 +159,7 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_monitors_list();
+        refresh_monitors_list("increase_brightness_error");
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -119,7 +173,14 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
     for monitor in MONITORS.lock().unwrap().iter_mut() {
         // Don't allow a relative decrease to black out the display.
         let new_brightness = monitor.get_brightness().saturating_sub(percent).max(1);
+        let write_started = Instant::now();
         let res = monitor.set_brightness(new_brightness);
+        log::debug!(
+            "Brightness write: monitor={} target_percent={new_brightness} success={} elapsed_ms={}",
+            monitor.name(),
+            res.is_ok(),
+            write_started.elapsed().as_millis()
+        );
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}: {err}", monitor.name());
@@ -129,7 +190,7 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_monitors_list();
+        refresh_monitors_list("decrease_brightness_error");
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -149,7 +210,7 @@ pub(crate) fn turn_off() -> anyhow::Result<()> {
 
     if last_error.is_some() {
         log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_monitors_list();
+        refresh_monitors_list("turn_off_error");
 
         last_error = None;
         for monitor in MONITORS.lock().unwrap().iter_mut() {
@@ -181,7 +242,7 @@ pub(crate) fn turn_on() -> anyhow::Result<()> {
 
     if last_error.is_some() {
         log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_monitors_list();
+        refresh_monitors_list("turn_on_error");
 
         last_error = None;
         for monitor in MONITORS.lock().unwrap().iter_mut() {
