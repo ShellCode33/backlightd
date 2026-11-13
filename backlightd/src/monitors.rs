@@ -7,9 +7,20 @@ use crate::ddc::BacklightDdcDevice;
 ///
 /// Querying/writing to backlight devices is expensive, we try to cache as many things as possible
 /// in order to avoid unnecessary I/O.
-static MONITORS: Mutex<Vec<Box<dyn BacklightDevice + Send>>> = Mutex::new(Vec::new());
+struct MonitorState {
+    devices: Vec<Box<dyn BacklightDevice + Send>>,
+    manual_target: Option<u8>,
+    pending_inheritance: Vec<String>,
+}
+
+static MONITORS: Mutex<MonitorState> = Mutex::new(MonitorState {
+    devices: Vec::new(),
+    manual_target: None,
+    pending_inheritance: Vec::new(),
+});
 
 pub(crate) trait BacklightDevice {
+    fn identity(&self) -> String;
     fn name(&self) -> String;
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()>;
     fn get_brightness(&self) -> u8;
@@ -91,11 +102,10 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
         acpi_started.elapsed().as_millis()
     );
     let mut monitors = MONITORS.lock().expect("Unable to acquire MONITORS mutex");
-    monitors.clear();
-    monitors.extend(new_monitors);
+    failures += replace_devices(&mut monitors, new_monitors, reason == "resume");
     log::debug!(
         "Discovery finished: reason={reason} monitors={} failed={failures} elapsed_ms={}",
-        monitors.len(),
+        monitors.devices.len(),
         started.elapsed().as_millis()
     );
     anyhow::ensure!(
@@ -105,7 +115,53 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn refresh_after_error(reason: &str) {
+pub(crate) fn set_manual_target(target: Option<u8>) {
+    let mut state = MONITORS.lock().unwrap();
+    state.manual_target = target;
+    if target.is_none() {
+        state.pending_inheritance.clear();
+    }
+}
+
+fn replace_devices(
+    state: &mut MonitorState,
+    mut discovered: Vec<Box<dyn BacklightDevice + Send>>,
+    recovered: bool,
+) -> usize {
+    let known: Vec<_> = state
+        .devices
+        .iter()
+        .map(|device| device.identity())
+        .collect();
+    let mut pending = Vec::new();
+    if let Some(target) = state.manual_target {
+        for device in &mut discovered {
+            let id = device.identity();
+            // Reconciliation keeps external changes on continuously present monitors.
+            // Failed inheritance is retried even if the monitor is already listed.
+            if recovered || !known.contains(&id) || state.pending_inheritance.contains(&id) {
+                if let Err(err) = device.set_brightness(target) {
+                    log::error!(
+                        "Unable to inherit manual target for {}: {err}",
+                        device.name()
+                    );
+                    pending.push(id);
+                }
+            }
+        }
+    }
+    let failures = pending.len();
+    state.pending_inheritance = pending;
+    state.devices = discovered;
+    failures
+}
+
+fn refresh_after_error(reason: &str, failed_ids: Vec<String>) {
+    MONITORS
+        .lock()
+        .unwrap()
+        .pending_inheritance
+        .extend(failed_ids);
     if let Err(err) = refresh_monitors_list(reason) {
         log::warn!("Recovery discovery incomplete: {err}");
     }
@@ -127,8 +183,9 @@ pub(crate) fn percent_to_raw(percent: u8, maximum: u16) -> anyhow::Result<u16> {
 
 pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
+    let mut failed_ids = Vec::new();
 
-    for monitor in MONITORS.lock().unwrap().iter_mut() {
+    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
         let write_started = Instant::now();
         let res = monitor.set_brightness(percent);
         log::debug!(
@@ -140,13 +197,14 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}", monitor.name());
+            failed_ids.push(monitor.identity());
             last_error = Some(err);
         }
     }
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_after_error("set_brightness_error");
+        refresh_after_error("set_brightness_error", failed_ids);
         Err(err)
     } else {
         log::info!("Brightness of all monitors has been set to {percent}%");
@@ -156,8 +214,9 @@ pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
 pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
+    let mut failed_ids = Vec::new();
 
-    for monitor in MONITORS.lock().unwrap().iter_mut() {
+    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
         let new_brightness = monitor.get_brightness().saturating_add(percent).min(100);
 
         let write_started = Instant::now();
@@ -171,13 +230,14 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}", monitor.name());
+            failed_ids.push(monitor.identity());
             last_error = Some(err);
         }
     }
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_after_error("increase_brightness_error");
+        refresh_after_error("increase_brightness_error", failed_ids);
         Err(err)
     } else {
         log::info!("Brightness of all monitors increased by {percent} percentage points");
@@ -187,8 +247,9 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
 pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
+    let mut failed_ids = Vec::new();
 
-    for monitor in MONITORS.lock().unwrap().iter_mut() {
+    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
         // Don't allow a relative decrease to black out the display.
         let new_brightness = monitor.get_brightness().saturating_sub(percent).max(1);
         let write_started = Instant::now();
@@ -202,13 +263,14 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}: {err}", monitor.name());
+            failed_ids.push(monitor.identity());
             last_error = Some(err);
         }
     }
 
     if let Some(err) = last_error {
         log::info!("Trying to refresh monitors list to fix the error...");
-        refresh_after_error("decrease_brightness_error");
+        refresh_after_error("decrease_brightness_error", failed_ids);
         Err(err)
     } else {
         log::info!("Brightness of all monitors decreased by {percent} percentage points");
@@ -218,20 +280,22 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
 
 pub(crate) fn turn_off() -> anyhow::Result<()> {
     let mut last_error = None;
+    let mut failed_ids = Vec::new();
 
-    for monitor in MONITORS.lock().unwrap().iter_mut() {
+    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
         if let Err(err) = monitor.turn_off() {
             log::error!("Unable to turn OFF monitor: {err}");
+            failed_ids.push(monitor.identity());
             last_error = Some(err);
         }
     }
 
     if last_error.is_some() {
         log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_after_error("turn_off_error");
+        refresh_after_error("turn_off_error", failed_ids);
 
         last_error = None;
-        for monitor in MONITORS.lock().unwrap().iter_mut() {
+        for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
             if let Err(err) = monitor.turn_off() {
                 log::error!("Unable to turn OFF monitor: {err}");
                 last_error = Some(err);
@@ -250,20 +314,22 @@ pub(crate) fn turn_off() -> anyhow::Result<()> {
 
 pub(crate) fn turn_on() -> anyhow::Result<()> {
     let mut last_error = None;
+    let mut failed_ids = Vec::new();
 
-    for monitor in MONITORS.lock().unwrap().iter_mut() {
+    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
         if let Err(err) = monitor.turn_on() {
             log::error!("Unable to turn ON monitor: {err}");
+            failed_ids.push(monitor.identity());
             last_error = Some(err);
         }
     }
 
     if last_error.is_some() {
         log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_after_error("turn_on_error");
+        refresh_after_error("turn_on_error", failed_ids);
 
         last_error = None;
-        for monitor in MONITORS.lock().unwrap().iter_mut() {
+        for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
             if let Err(err) = monitor.turn_on() {
                 log::error!("Unable to turn ON monitor: {err}");
                 last_error = Some(err);
@@ -281,7 +347,8 @@ pub(crate) fn turn_on() -> anyhow::Result<()> {
 }
 
 pub(crate) fn get_average_brightness() -> u8 {
-    let monitors = MONITORS.lock().unwrap();
+    let state = MONITORS.lock().unwrap();
+    let monitors = &state.devices;
 
     if monitors.is_empty() {
         return 0;
@@ -289,7 +356,7 @@ pub(crate) fn get_average_brightness() -> u8 {
 
     let mut sum: usize = 0;
 
-    for monitor in &*monitors {
+    for monitor in monitors {
         sum += monitor.get_brightness() as usize;
     }
 
@@ -299,6 +366,108 @@ pub(crate) fn get_average_brightness() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeDevice {
+        id: &'static str,
+        brightness: u8,
+        fail: bool,
+    }
+    impl BacklightDevice for FakeDevice {
+        fn identity(&self) -> String {
+            self.id.into()
+        }
+        fn name(&self) -> String {
+            "same model".into()
+        }
+        fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
+            if self.fail {
+                anyhow::bail!("device not ready");
+            }
+            self.brightness = percent;
+            Ok(())
+        }
+        fn get_brightness(&self) -> u8 {
+            self.brightness
+        }
+        fn turn_off(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn turn_on(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    fn device(id: &'static str, brightness: u8, fail: bool) -> Box<dyn BacklightDevice + Send> {
+        Box::new(FakeDevice {
+            id,
+            brightness,
+            fail,
+        })
+    }
+
+    #[test]
+    fn inheritance_only_changes_new_or_recovered_identities() {
+        let mut state = MonitorState {
+            devices: vec![device("a", 95, false)],
+            manual_target: Some(95),
+            pending_inheritance: vec![],
+        };
+        assert_eq!(
+            replace_devices(
+                &mut state,
+                vec![device("a", 80, false), device("b", 100, false)],
+                false
+            ),
+            0
+        );
+        assert_eq!(state.devices[0].get_brightness(), 80);
+        assert_eq!(state.devices[1].get_brightness(), 95);
+        // Removing and reintroducing b must inherit again, despite the same model name.
+        replace_devices(&mut state, vec![device("a", 80, false)], false);
+        replace_devices(
+            &mut state,
+            vec![device("a", 80, false), device("b", 100, false)],
+            false,
+        );
+        assert_eq!(state.devices[1].get_brightness(), 95);
+    }
+
+    #[test]
+    fn failed_inheritance_is_retried_and_reported() {
+        let mut state = MonitorState {
+            devices: vec![],
+            manual_target: Some(95),
+            pending_inheritance: vec![],
+        };
+        assert_eq!(
+            replace_devices(&mut state, vec![device("a", 100, true)], false),
+            1
+        );
+        assert_eq!(state.pending_inheritance, vec!["a"]);
+        assert_eq!(
+            replace_devices(&mut state, vec![device("a", 100, false)], false),
+            0
+        );
+        assert_eq!(state.devices[0].get_brightness(), 95);
+        assert!(state.pending_inheritance.is_empty());
+        // A failed operation on an already listed monitor also marks it for inheritance.
+        state.pending_inheritance.push("a".into());
+        replace_devices(&mut state, vec![device("a", 100, false)], false);
+        assert_eq!(state.devices[0].get_brightness(), 95);
+    }
+
+    #[test]
+    fn resume_reconciles_known_monitors_but_auto_has_no_manual_target() {
+        let mut state = MonitorState {
+            devices: vec![device("a", 95, false)],
+            manual_target: Some(95),
+            pending_inheritance: vec![],
+        };
+        replace_devices(&mut state, vec![device("a", 100, false)], true);
+        assert_eq!(state.devices[0].get_brightness(), 95);
+        state.manual_target = None;
+        replace_devices(&mut state, vec![device("a", 100, false)], true);
+        assert_eq!(state.devices[0].get_brightness(), 100);
+    }
 
     #[test]
     fn device_scale_boundaries_and_invalid_values() {

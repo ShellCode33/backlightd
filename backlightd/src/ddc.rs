@@ -53,6 +53,14 @@ impl BacklightDdcDevice {
 }
 
 impl BacklightDevice for BacklightDdcDevice {
+    fn identity(&self) -> String {
+        // Include EDID so replacing a monitor on the same bus counts as a new device.
+        format!(
+            "ddc:{}:{}:{:?}",
+            self.display.info.backend, self.display.info.id, self.display.info.edid_data
+        )
+    }
+
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
         let new_brightness = percent_to_raw(percent, self.max_brightness_raw)?;
 

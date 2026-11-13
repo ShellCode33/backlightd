@@ -42,6 +42,10 @@ impl BacklightAcpiDevice {
 }
 
 impl BacklightDevice for BacklightAcpiDevice {
+    fn identity(&self) -> String {
+        format!("acpi:{}", self.path.display())
+    }
+
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
         let current_brightness_path = self.path.join("brightness");
         let new_brightness = percent_to_raw(percent, self.max_brightness_raw)?;
