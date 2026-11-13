@@ -1,13 +1,10 @@
-use std::{
-    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
-    time::Duration,
-};
+use std::{sync::mpsc::Sender, time::Duration};
 
 use anyhow::bail;
 use backlight_ipc::{BacklightCommand, BacklightInfo, BacklightMode};
 use boot_time::Instant;
 
-use crate::{auto, monitors};
+use crate::{auto, monitors, wake::Receiver};
 
 const MANUAL_DURATION: Duration = Duration::from_secs(12 * 60 * 60);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -139,25 +136,20 @@ impl<D: Devices> Controller<D> {
     }
 }
 
-pub(crate) fn run_controller(receiver: Receiver<Request>) {
+pub(crate) fn run_controller(receiver: Receiver<Request>) -> anyhow::Result<()> {
     let mut controller = Controller::new(Monitors);
     if let Err(err) = controller.refresh() {
         log::error!("Initial monitor refresh failed: {err}");
     }
     loop {
-        let delay = controller
-            .deadline
-            .min(controller.refresh_deadline)
-            .checked_duration_since(Instant::now())
-            .unwrap_or_default();
-        match receiver.recv_timeout(delay) {
-            Ok(request) => {
+        let deadline = controller.deadline.min(controller.refresh_deadline);
+        match receiver.recv_until(deadline) {
+            Ok(Some(request)) => {
                 let _ = request.reply.send(controller.command(request.command));
             }
-            Err(RecvTimeoutError::Timeout) => {
-                controller.service_deadlines();
-            }
-            Err(RecvTimeoutError::Disconnected) => return,
+            Ok(None) => controller.service_deadlines(),
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            Err(err) => return Err(err.into()),
         }
     }
 }
@@ -217,6 +209,18 @@ mod tests {
         c.adjust().unwrap();
         c
     }
+    #[test]
+    fn overdue_refresh_and_manual_override_are_serviced_together() {
+        let mut c = controller();
+        c.command(BacklightCommand::SetBrightness(20)).unwrap();
+        c.refresh_deadline = Instant::now();
+        c.deadline = Instant::now();
+        c.service_deadlines();
+        assert_eq!(c.devices.refreshes, 1);
+        assert_eq!(c.mode, BacklightMode::Auto);
+        assert_eq!(c.devices.hardware_brightness, 50);
+    }
+
     #[test]
     fn explicit_refresh_precedes_relative_adjustment_in_manual_mode() {
         let mut c = controller();

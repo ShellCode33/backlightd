@@ -7,7 +7,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     process::exit,
-    sync::mpsc::{channel, Sender},
+    sync::mpsc::channel,
     thread::{self, sleep, JoinHandle},
     time::Duration,
 };
@@ -15,6 +15,7 @@ use std::{
 use anyhow::anyhow;
 use backlight_ipc::{BacklightCommand, DEFAULT_UNIX_SOCKET_PATH};
 use controller::{run_controller, Request};
+use wake::Sender;
 
 mod acpi;
 mod auto;
@@ -22,6 +23,7 @@ mod controller;
 mod ddc;
 mod location;
 mod monitors;
+mod wake;
 
 fn main() {
     pretty_env_logger::formatted_builder()
@@ -54,9 +56,14 @@ fn main() {
         }
     };
 
-    let (auto_sender, auto_receiver) = channel();
+    let (auto_sender, auto_receiver) =
+        wake::channel().expect("Unable to create controller wait descriptors");
 
-    let auto_adjust_thread = thread::spawn(move || run_controller(auto_receiver));
+    let auto_adjust_thread = thread::spawn(move || {
+        if let Err(err) = run_controller(auto_receiver) {
+            log::error!("Controller failed: {err}");
+        }
+    });
     let handle_clients_thread = thread::spawn(move || handle_clients_thread(listener, auto_sender));
 
     loop {
@@ -175,7 +182,7 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let (sender, receiver) = channel::<Request>();
+        let (sender, receiver) = wake::channel::<Request>().unwrap();
         let mut workers = Vec::new();
         spawn_client(idle_server, sender.clone(), &mut workers).unwrap();
         spawn_client(server, sender, &mut workers).unwrap();
@@ -208,7 +215,7 @@ mod tests {
             let (mut client, server) = UnixStream::pair().unwrap();
             use std::io::Write;
             client.write_all(partial).unwrap();
-            let (sender, _receiver) = channel();
+            let (sender, _receiver) = wake::channel().unwrap();
             // Keep the client connected while checking that the read expires.
             let err = handle_client(server, &sender, Duration::from_millis(20)).unwrap_err();
             assert!(err
@@ -219,7 +226,7 @@ mod tests {
 
     #[test]
     fn connection_limit_rejects_excess_clients_and_releases_slots() {
-        let (sender, _receiver) = channel();
+        let (sender, _receiver) = wake::channel().unwrap();
         let mut workers = Vec::new();
         let mut clients = Vec::new();
         for _ in 0..MAX_CLIENTS {
@@ -251,7 +258,7 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let (sender, receiver) = channel::<Request>();
+        let (sender, receiver) = wake::channel::<Request>().unwrap();
         let worker = thread::spawn(move || handle_client(server, &sender, CLIENT_IO_TIMEOUT));
         BacklightCommand::SetMode(BacklightMode::Auto)
             .serialize_into(&client)
@@ -273,7 +280,7 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let (sender, receiver) = channel::<Request>();
+        let (sender, receiver) = wake::channel::<Request>().unwrap();
         let worker = thread::spawn(move || handle_client(server, &sender, CLIENT_IO_TIMEOUT));
         BacklightCommand::SetMode(BacklightMode::Auto)
             .serialize_into(&client)

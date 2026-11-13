@@ -114,6 +114,7 @@ dependencies = [
  "boot-time",
  "chrono",
  "ddc-hi",
+ "libc",
  "log",
  "pretty_env_logger",
  "serde",
