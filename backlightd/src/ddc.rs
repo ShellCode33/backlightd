@@ -5,7 +5,7 @@ use std::error::Error;
 use anyhow::bail;
 use ddc_hi::{Ddc, Display, FeatureCode};
 
-use crate::monitors::BacklightDevice;
+use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice};
 
 const VCP_FEATURE_BRIGHTNESS: FeatureCode = 0x10;
 const VCP_FEATURE_POWER: FeatureCode = 0xD6;
@@ -27,16 +27,14 @@ impl BacklightDdcDevice {
             display: ddc_device,
             max_brightness_raw: brightness.maximum(),
             current_brightness_raw: brightness.value(),
-            current_brightness_percent: (brightness.value() * 100 / brightness.maximum()) as u8,
+            current_brightness_percent: raw_to_percent(brightness.value(), brightness.maximum())?,
         })
     }
 }
 
 impl BacklightDevice for BacklightDdcDevice {
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
-        assert!(percent <= 100);
-
-        let new_brightness = (percent as f64 / 100. * self.max_brightness_raw as f64) as u16;
+        let new_brightness = percent_to_raw(percent, self.max_brightness_raw)?;
 
         if let Err(err) = self
             .display

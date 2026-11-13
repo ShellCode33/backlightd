@@ -89,6 +89,20 @@ pub(crate) fn refresh_monitors_list() {
         .expect("Unable to acquire LAST_REFRESH mutex") = Some(Instant::now());
 }
 
+// Use widened integer arithmetic for device scales up to u16::MAX.
+pub(crate) fn raw_to_percent(raw: u16, maximum: u16) -> anyhow::Result<u8> {
+    anyhow::ensure!(maximum > 0, "Maximum brightness must be positive");
+    anyhow::ensure!(raw <= maximum, "Brightness exceeds device maximum");
+    Ok(((u32::from(raw) * 100 + u32::from(maximum) / 2) / u32::from(maximum)) as u8)
+}
+
+pub(crate) fn percent_to_raw(percent: u8, maximum: u16) -> anyhow::Result<u16> {
+    anyhow::ensure!(percent <= 100, "Brightness percentage must not exceed 100");
+    anyhow::ensure!(maximum > 0, "Maximum brightness must be positive");
+    let raw = ((u32::from(percent) * u32::from(maximum) + 50) / 100) as u16;
+    Ok(if percent > 0 { raw.max(1) } else { 0 })
+}
+
 pub(crate) fn set_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
 
@@ -115,11 +129,7 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
 
     for monitor in MONITORS.lock().unwrap().iter_mut() {
-        let mut new_brightness = monitor.get_brightness() + percent;
-
-        if new_brightness > 100 {
-            new_brightness = 100;
-        }
+        let new_brightness = monitor.get_brightness().saturating_add(percent).min(100);
 
         let res = monitor.set_brightness(new_brightness);
 
@@ -143,14 +153,9 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
     let mut last_error = None;
 
     for monitor in MONITORS.lock().unwrap().iter_mut() {
-        let mut new_brightness = monitor.get_brightness() as i8 - percent as i8;
-
-        // Don't allow setting the brightness to 0 to prevent the monitor from being completely black.
-        if new_brightness < 1 {
-            new_brightness = 1;
-        }
-
-        let res = monitor.set_brightness(new_brightness as u8);
+        // Don't allow a relative decrease to black out the display.
+        let new_brightness = monitor.get_brightness().saturating_sub(percent).max(1);
+        let res = monitor.set_brightness(new_brightness);
 
         if let Err(err) = res {
             log::error!("Unable to set brightness of {}: {err}", monitor.name());
@@ -246,4 +251,30 @@ pub(crate) fn get_average_brightness() -> u8 {
     }
 
     (sum / monitors.len()) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_scale_boundaries_and_invalid_values() {
+        assert_eq!(raw_to_percent(u16::MAX, u16::MAX).unwrap(), 100);
+        assert_eq!(raw_to_percent(0, u16::MAX).unwrap(), 0);
+        assert_eq!(raw_to_percent(1, 3).unwrap(), 33);
+        assert_eq!(raw_to_percent(2, 3).unwrap(), 67);
+        assert!(raw_to_percent(0, 0).is_err());
+        assert!(raw_to_percent(101, 100).is_err());
+        assert!(percent_to_raw(101, 100).is_err());
+        assert!(percent_to_raw(1, 0).is_err());
+        assert_eq!(percent_to_raw(100, u16::MAX).unwrap(), u16::MAX);
+        assert_eq!(percent_to_raw(50, 3).unwrap(), 2);
+        assert_eq!(percent_to_raw(0, 3).unwrap(), 0);
+        for maximum in [1, 3, 100, u16::MAX] {
+            for percent in 1..=100 {
+                let raw = percent_to_raw(percent, maximum).unwrap();
+                assert!((1..=maximum).contains(&raw));
+            }
+        }
+    }
 }
