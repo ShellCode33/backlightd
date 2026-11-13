@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fmt::Display,
     io::{Read, Write},
 };
 
@@ -7,15 +8,26 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_UNIX_SOCKET_PATH: &str = "/run/backlightd.sock";
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum BacklightMode {
     Auto,
     Manual,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl Display for BacklightMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BacklightMode::Auto => write!(f, "auto"),
+            BacklightMode::Manual => write!(f, "manual"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct BacklightInfo {
     pub brightness_percent: u8,
+    pub mode: BacklightMode,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -30,6 +42,7 @@ pub enum BacklightCommand {
     GetInfo,
     GetInfoResponse(BacklightInfo),
     NotifyShutdown,
+    ErrorResponse(String),
 }
 
 // The following abstraction allow us to easily change the protocol if need be.

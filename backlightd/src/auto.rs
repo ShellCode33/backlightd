@@ -1,66 +1,23 @@
-use core::panic;
-use std::{
-    sync::mpsc::{Receiver, RecvTimeoutError},
-    time::Duration,
-};
+use std::time::Duration;
 
-use anyhow::anyhow;
-use backlight_ipc::BacklightMode;
-use boot_time::Instant;
 use chrono::{DateTime, Datelike, Local, NaiveTime};
-use log::{error, info};
 use sunrise::sunrise_sunset;
 
-use crate::{location::find_location, monitors};
-
-const AUTO_ADJUST_INTERVAL: Duration = Duration::from_secs(600);
+use crate::location::find_location;
 
 const BRIGHTNESS_TRANSITION_DURATION: Duration = Duration::from_secs(4 * 60 * 60);
 const FALLBACK_BRIGHTNESS_UP_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_opt(6, 0, 0);
 const FALLBACK_BRIGHTNESS_DOWN_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_opt(18, 0, 0);
 
-pub fn auto_adjust(auto_adjust_receiver: Receiver<BacklightMode>) -> ! {
-    let mut current_mode = BacklightMode::Auto;
-    let mut last_time_mode_was_changed = Instant::now();
-
-    loop {
-        if matches!(current_mode, BacklightMode::Auto) {
-            let result = match find_location() {
-                Ok(Some((latitude, longitude))) => monitors::set_brightness_percent(
-                    get_brightness_based_on_location(latitude, longitude),
-                ),
-                Ok(None) => monitors::set_brightness_percent(get_brightness_based_on_time()),
-                Err(err) => Err(anyhow!("find location function failed: {err}")),
-            };
-
-            if let Err(err) = result {
-                error!("Unable to set brightness: {err}");
-            }
-        }
-
-        match auto_adjust_receiver.recv_timeout(AUTO_ADJUST_INTERVAL) {
-            Ok(new_mode) => {
-                if new_mode != current_mode {
-                    info!("Set backlightd mode to {new_mode:?}");
-                }
-                last_time_mode_was_changed = Instant::now();
-                current_mode = new_mode;
-            }
-            Err(err) => match err {
-                RecvTimeoutError::Timeout => {} // fallthrough
-                RecvTimeoutError::Disconnected => panic!("channel sender disconnected"),
-            },
-        }
-
-        // Set back the mode to auto when the mode has not been changed for 12 hours,
-        // so that the user doesn't have to manually set the auto mode after a manual adjustment.
-        if Instant::now() - last_time_mode_was_changed > Duration::from_secs(12 * 60 * 60) {
-            current_mode = BacklightMode::Auto;
-        }
+// Calculate both the target and the next time it can change. No hardware polling.
+pub(crate) fn next_adjustment() -> anyhow::Result<(u8, Duration)> {
+    match find_location()? {
+        Some((latitude, longitude)) => Ok(get_brightness_based_on_location(latitude, longitude)),
+        None => Ok(get_brightness_based_on_time()),
     }
 }
 
-fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> u8 {
+fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> (u8, Duration) {
     let now = Local::now();
     let (sunrise_timestamp, sunset_timestamp) =
         sunrise_sunset(latitude, longitude, now.year(), now.month(), now.day());
@@ -71,7 +28,7 @@ fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> u8 {
         .expect("failed to create datetime from sunset timestamp")
         .into();
 
-    compute_brightness_percentage(
+    scheduled_brightness(
         now,
         sunrise_datetime,
         sunrise_datetime + BRIGHTNESS_TRANSITION_DURATION,
@@ -80,9 +37,9 @@ fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> u8 {
     )
 }
 
-fn get_brightness_based_on_time() -> u8 {
+fn get_brightness_based_on_time() -> (u8, Duration) {
     let now = Local::now();
-    compute_brightness_percentage(
+    scheduled_brightness(
         now,
         now.with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
             .unwrap(),
@@ -94,6 +51,59 @@ fn get_brightness_based_on_time() -> u8 {
         now.with_time(FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap())
             .unwrap()
             + BRIGHTNESS_TRANSITION_DURATION,
+    )
+}
+
+fn scheduled_brightness(
+    now: DateTime<Local>,
+    up_begin: DateTime<Local>,
+    up_end: DateTime<Local>,
+    down_begin: DateTime<Local>,
+    down_end: DateTime<Local>,
+) -> (u8, Duration) {
+    let brightness = compute_brightness_percentage(now, up_begin, up_end, down_begin, down_end);
+    // Recalculate the solar schedule at the next local date boundary as well.
+    let midnight = now
+        .date_naive()
+        .succ_opt()
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(Local)
+        .earliest()
+        .unwrap_or(now + chrono::Duration::hours(1));
+    let next = if now < up_begin {
+        up_begin
+            + chrono::Duration::seconds(
+                ((up_end - up_begin).num_seconds() as f64 / 198.).ceil() as i64
+            )
+    } else if now < up_end {
+        up_begin
+            + chrono::Duration::seconds(
+                (((brightness as f64 - 0.5) / 99.) * (up_end - up_begin).num_seconds() as f64)
+                    .ceil() as i64,
+            )
+    } else if now < down_begin {
+        down_begin
+            + chrono::Duration::seconds(
+                ((down_end - down_begin).num_seconds() as f64 / 198.).floor() as i64 + 1,
+            )
+    } else if now < down_end && brightness > 1 {
+        down_begin
+            + chrono::Duration::seconds(
+                (((100.5 - brightness as f64) / 99.) * (down_end - down_begin).num_seconds() as f64)
+                    .floor() as i64
+                    + 1,
+            )
+    } else {
+        midnight
+    };
+    (
+        brightness,
+        (next.min(midnight) - now)
+            .to_std()
+            .unwrap_or(Duration::from_secs(1))
+            .max(Duration::from_secs(1)),
     )
 }
 
@@ -130,6 +140,23 @@ mod tests {
     use chrono::Timelike;
 
     use super::*;
+
+    #[test]
+    fn schedule_wakes_at_next_integer_change_or_transition() {
+        let day = Local::now();
+        let at = |hour| {
+            day.with_time(NaiveTime::from_hms_opt(hour, 0, 0).unwrap())
+                .unwrap()
+        };
+        let schedule = |now| scheduled_brightness(now, at(6), at(10), at(18), at(22));
+        for now in [at(5), at(6), at(8), at(12), at(18), at(20)] {
+            let (brightness, delay) = schedule(now);
+            let next = now + delay;
+            assert!(delay > Duration::ZERO);
+            assert_ne!(schedule(next).0, brightness);
+            assert_eq!(schedule(next - Duration::from_secs(1)).0, brightness);
+        }
+    }
 
     #[test]
     fn test_fallback() {

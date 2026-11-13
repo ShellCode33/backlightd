@@ -12,13 +12,14 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, bail};
-use auto::auto_adjust;
-use backlight_ipc::{BacklightCommand, BacklightInfo, BacklightMode, DEFAULT_UNIX_SOCKET_PATH};
+use anyhow::anyhow;
+use backlight_ipc::{BacklightCommand, DEFAULT_UNIX_SOCKET_PATH};
+use controller::{run_controller, Request};
 use monitors::auto_refresh_monitors_list;
 
 mod acpi;
 mod auto;
+mod controller;
 mod ddc;
 mod location;
 mod monitors;
@@ -56,8 +57,10 @@ fn main() {
 
     let (auto_sender, auto_receiver) = channel();
 
+    monitors::refresh_monitors_list();
+
     let auto_refresh_monitors_thread = thread::spawn(move || auto_refresh_monitors_list());
-    let auto_adjust_thread = thread::spawn(move || auto_adjust(auto_receiver));
+    let auto_adjust_thread = thread::spawn(move || run_controller(auto_receiver));
     let handle_clients_thread = thread::spawn(move || handle_clients_thread(listener, auto_sender));
 
     loop {
@@ -77,23 +80,6 @@ fn main() {
     }
 }
 
-fn handle_clients_thread(listener: UnixListener, auto_adjust_sender: Sender<BacklightMode>) {
-    for stream in listener.incoming() {
-        let client = match stream {
-            Ok(client) => client,
-            Err(err) => {
-                log::error!("Failed to accept incoming client: {err}");
-                continue;
-            }
-        };
-
-        if let Err(err) = handle_client(client, auto_adjust_sender.clone()) {
-            log::error!("{err}");
-            continue;
-        }
-    }
-}
-
 fn create_unix_socket(unix_socket_path: &str) -> anyhow::Result<UnixListener> {
     if let Err(err) = remove_file(unix_socket_path) {
         if !matches!(err.kind(), io::ErrorKind::NotFound) {
@@ -107,68 +93,104 @@ fn create_unix_socket(unix_socket_path: &str) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
-fn handle_client(
-    client: UnixStream,
-    auto_adjust_sender: Sender<BacklightMode>,
-) -> anyhow::Result<()> {
-    loop {
-        let command = match BacklightCommand::deserialize_from(&client) {
-            Ok(cmd) => cmd,
-            Err(err) => bail!("Unable to deserialize command: {err}"),
-        };
-
-        let result = match command {
-            BacklightCommand::SetBrightness(percent) => {
-                auto_adjust_sender
-                    .send(BacklightMode::Manual)
-                    .expect("Failed to send BacklightMode through auto adjust channel");
-                monitors::set_brightness_percent(percent)
+fn handle_clients_thread(listener: UnixListener, sender: Sender<Request>) {
+    for stream in listener.incoming() {
+        match stream {
+            Ok(client) => {
+                if let Err(err) = handle_client(client, &sender) {
+                    log::error!("{err}");
+                }
             }
-            BacklightCommand::IncreaseBrightness(percent) => {
-                auto_adjust_sender
-                    .send(BacklightMode::Manual)
-                    .expect("Failed to send BacklightMode through auto adjust channel");
-                monitors::increase_brightness_percent(percent)
-            }
-            BacklightCommand::DecreaseBrightness(percent) => {
-                auto_adjust_sender
-                    .send(BacklightMode::Manual)
-                    .expect("Failed to send BacklightMode through auto adjust channel");
-                monitors::decrease_brightness_percent(percent)
-            }
-            BacklightCommand::Refresh => {
-                monitors::refresh_monitors_list();
-                Ok(())
-            }
-            BacklightCommand::SetMode(backlight_mode) => {
-                auto_adjust_sender
-                    .send(backlight_mode)
-                    .unwrap_or_else(|err| {
-                        log::error!("Failed to send mode to auto adjust channel: {err}")
-                    });
-                Ok(())
-            }
-            BacklightCommand::GetInfo => {
-                BacklightCommand::GetInfoResponse(BacklightInfo {
-                    brightness_percent: monitors::get_average_brightness(),
-                })
-                .serialize_into(&client)
-                .unwrap_or_else(|err| log::error!("Unable to serialize GetInfoResponse: {err}"));
-                Ok(())
-            }
-            BacklightCommand::GetInfoResponse(_) => {
-                log::warn!("Got GetInfoResponse from client, API misuse ?");
-                Ok(())
-            }
-            BacklightCommand::NotifyShutdown => break,
-            BacklightCommand::TurnOffMonitors => monitors::turn_off(),
-            BacklightCommand::TurnOnMonitors => monitors::turn_on(),
-        };
-
-        if let Err(err) = result {
-            log::error!("Command handling failed: {err}");
+            Err(err) => log::error!("Failed to accept incoming client: {err}"),
         }
     }
+}
 
-    Ok(())
+fn handle_client(client: UnixStream, sender: &Sender<Request>) -> anyhow::Result<()> {
+    loop {
+        let command = BacklightCommand::deserialize_from(&client)
+            .map_err(|err| anyhow!("Unable to deserialize command: {err}"))?;
+        if matches!(command, BacklightCommand::NotifyShutdown) {
+            return Ok(());
+        }
+        let get_info = matches!(command, BacklightCommand::GetInfo);
+        let (reply, response) = channel();
+        sender
+            .send(Request { command, reply })
+            .map_err(|_| anyhow!("Brightness controller disconnected"))?;
+        let result = response
+            .recv()
+            .map_err(|_| anyhow!("Brightness controller dropped its reply"))?;
+        match result {
+            Ok(info) if get_info => BacklightCommand::GetInfoResponse(info)
+                .serialize_into(&client)
+                .map_err(|err| anyhow!("Unable to serialize response: {err}"))?,
+            Ok(_) => {}
+            Err(err) => {
+                BacklightCommand::ErrorResponse(err.to_string())
+                    .serialize_into(&client)
+                    .map_err(|err| anyhow!("Unable to serialize error: {err}"))?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use backlight_ipc::{BacklightInfo, BacklightMode};
+
+    #[test]
+    fn client_receives_controller_error_without_waiting_for_status() {
+        let (client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = channel::<Request>();
+        let worker = thread::spawn(move || handle_client(server, &sender));
+        BacklightCommand::SetMode(BacklightMode::Auto)
+            .serialize_into(&client)
+            .unwrap();
+        let request = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        request
+            .reply
+            .send(Err(anyhow!("device unavailable")))
+            .unwrap();
+        assert!(
+            matches!(BacklightCommand::deserialize_from(&client).unwrap(), BacklightCommand::ErrorResponse(message) if message == "device unavailable")
+        );
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn client_waits_for_completion_before_requesting_status() {
+        let (client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = channel::<Request>();
+        let worker = thread::spawn(move || handle_client(server, &sender));
+        BacklightCommand::SetMode(BacklightMode::Auto)
+            .serialize_into(&client)
+            .unwrap();
+        BacklightCommand::GetInfo.serialize_into(&client).unwrap();
+        let request = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(receiver.try_recv().is_err());
+        let info = BacklightInfo {
+            brightness_percent: 50,
+            mode: BacklightMode::Auto,
+        };
+        request.reply.send(Ok(info)).unwrap();
+        let status = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(status.command, BacklightCommand::GetInfo));
+        status.reply.send(Ok(info)).unwrap();
+        assert!(
+            matches!(BacklightCommand::deserialize_from(&client).unwrap(), BacklightCommand::GetInfoResponse(value) if value.brightness_percent == 50 && value.mode == BacklightMode::Auto)
+        );
+        BacklightCommand::NotifyShutdown
+            .serialize_into(&client)
+            .unwrap();
+        worker.join().unwrap().unwrap();
+    }
 }

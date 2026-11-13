@@ -206,6 +206,10 @@ fn main() {
 
     let backlight_info = match BacklightCommand::deserialize_from(&stream) {
         Ok(BacklightCommand::GetInfoResponse(info)) => info,
+        Ok(BacklightCommand::ErrorResponse(err)) => {
+            eprintln!("{err}");
+            exit(1);
+        }
         Ok(cmd) => {
             eprintln!("Unexpected response: {cmd:?}");
             exit(1);
@@ -228,6 +232,7 @@ fn main() {
         }
     } else {
         println!("Current brightness: {}%", backlight_info.brightness_percent);
+        println!("Current mode: {}", backlight_info.mode);
     }
 
     if let Err(err) = BacklightCommand::NotifyShutdown.serialize_into(&stream) {
