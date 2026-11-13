@@ -102,7 +102,7 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
         acpi_started.elapsed().as_millis()
     );
     let mut monitors = MONITORS.lock().expect("Unable to acquire MONITORS mutex");
-    failures += replace_devices(&mut monitors, new_monitors, reason == "resume");
+    failures += replace_devices(&mut monitors, new_monitors, reason);
     log::debug!(
         "Discovery finished: reason={reason} monitors={} failed={failures} elapsed_ms={}",
         monitors.devices.len(),
@@ -126,7 +126,7 @@ pub(crate) fn set_manual_target(target: Option<u8>) {
 fn replace_devices(
     state: &mut MonitorState,
     mut discovered: Vec<Box<dyn BacklightDevice + Send>>,
-    recovered: bool,
+    reason: &str,
 ) -> usize {
     let known: Vec<_> = state
         .devices
@@ -139,10 +139,19 @@ fn replace_devices(
             let id = device.identity();
             // Reconciliation keeps external changes on continuously present monitors.
             // Failed inheritance is retried even if the monitor is already listed.
-            if recovered || !known.contains(&id) || state.pending_inheritance.contains(&id) {
-                if let Err(err) = device.set_brightness(target) {
+            if reason == "resume" || !known.contains(&id) || state.pending_inheritance.contains(&id)
+            {
+                let write_started = Instant::now();
+                let result = device.set_brightness(target);
+                log::debug!(
+                    "Manual target inheritance: monitor={} id={id:?} reason={reason} target_percent={target} success={} elapsed_ms={}",
+                    device.name(),
+                    result.is_ok(),
+                    write_started.elapsed().as_millis()
+                );
+                if let Err(err) = result {
                     log::error!(
-                        "Unable to inherit manual target for {}: {err}",
+                        "Unable to inherit manual target: monitor={} id={id:?} reason={reason} target_percent={target}: {err}",
                         device.name()
                     );
                     pending.push(id);
@@ -415,18 +424,18 @@ mod tests {
             replace_devices(
                 &mut state,
                 vec![device("a", 80, false), device("b", 100, false)],
-                false
+                "test"
             ),
             0
         );
         assert_eq!(state.devices[0].get_brightness(), 80);
         assert_eq!(state.devices[1].get_brightness(), 95);
         // Removing and reintroducing b must inherit again, despite the same model name.
-        replace_devices(&mut state, vec![device("a", 80, false)], false);
+        replace_devices(&mut state, vec![device("a", 80, false)], "test");
         replace_devices(
             &mut state,
             vec![device("a", 80, false), device("b", 100, false)],
-            false,
+            "test",
         );
         assert_eq!(state.devices[1].get_brightness(), 95);
     }
@@ -439,19 +448,19 @@ mod tests {
             pending_inheritance: vec![],
         };
         assert_eq!(
-            replace_devices(&mut state, vec![device("a", 100, true)], false),
+            replace_devices(&mut state, vec![device("a", 100, true)], "test"),
             1
         );
         assert_eq!(state.pending_inheritance, vec!["a"]);
         assert_eq!(
-            replace_devices(&mut state, vec![device("a", 100, false)], false),
+            replace_devices(&mut state, vec![device("a", 100, false)], "test"),
             0
         );
         assert_eq!(state.devices[0].get_brightness(), 95);
         assert!(state.pending_inheritance.is_empty());
         // A failed operation on an already listed monitor also marks it for inheritance.
         state.pending_inheritance.push("a".into());
-        replace_devices(&mut state, vec![device("a", 100, false)], false);
+        replace_devices(&mut state, vec![device("a", 100, false)], "test");
         assert_eq!(state.devices[0].get_brightness(), 95);
     }
 
@@ -462,10 +471,10 @@ mod tests {
             manual_target: Some(95),
             pending_inheritance: vec![],
         };
-        replace_devices(&mut state, vec![device("a", 100, false)], true);
+        replace_devices(&mut state, vec![device("a", 100, false)], "resume");
         assert_eq!(state.devices[0].get_brightness(), 95);
         state.manual_target = None;
-        replace_devices(&mut state, vec![device("a", 100, false)], true);
+        replace_devices(&mut state, vec![device("a", 100, false)], "resume");
         assert_eq!(state.devices[0].get_brightness(), 100);
     }
 
