@@ -148,6 +148,7 @@ fn handle_client(
             return Ok(());
         }
         let get_info = matches!(command, BacklightCommand::GetInfo);
+        let hotplug = matches!(command, BacklightCommand::NotifyHotplug);
         let (reply, response) = channel();
         sender
             .send(Request {
@@ -156,6 +157,10 @@ fn handle_client(
                 reply,
             })
             .map_err(|_| anyhow!("Brightness controller disconnected"))?;
+        // udev must be free to deliver the rest of an event burst while scanning.
+        if hotplug {
+            return Ok(());
+        }
         let result = response
             .recv()
             .map_err(|_| anyhow!("Brightness controller dropped its reply"))?;
@@ -178,6 +183,23 @@ fn handle_client(
 mod tests {
     use super::*;
     use backlight_ipc::{BacklightInfo, BacklightMode};
+
+    #[test]
+    fn hotplug_notification_does_not_wait_for_controller_or_client_shutdown() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (sender, receiver) = wake::channel().unwrap();
+        let worker = thread::spawn(move || {
+            handle_client(server, &sender, Duration::from_millis(20)).unwrap();
+        });
+        BacklightCommand::NotifyHotplug
+            .serialize_into(&client)
+            .unwrap();
+        let request = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(request.command, BacklightCommand::NotifyHotplug));
+        // Keep both the reply and client open: the worker must finish independently.
+        worker.join().unwrap();
+        assert!(request.reply.send(Err(anyhow!("unused reply"))).is_err());
+    }
 
     #[test]
     fn idle_client_does_not_block_another_client() {

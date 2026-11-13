@@ -42,6 +42,7 @@ pub enum BacklightCommand {
     TurnOffMonitors,
     TurnOnMonitors,
     Refresh,
+    NotifyHotplug,
     SetMode(BacklightMode),
     GetInfo,
     GetInfoResponse(BacklightInfo),
@@ -117,6 +118,10 @@ mod tests {
                 r#"{"type":"turn_on_monitors"}"#,
             ),
             (BacklightCommand::Refresh, r#"{"type":"refresh"}"#),
+            (
+                BacklightCommand::NotifyHotplug,
+                r#"{"type":"notify_hotplug"}"#,
+            ),
             (
                 BacklightCommand::SetMode(BacklightMode::Auto),
                 r#"{"type":"set_mode","value":"auto"}"#,

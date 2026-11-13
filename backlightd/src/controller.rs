@@ -8,6 +8,8 @@ use crate::{auto, monitors, wake::Receiver};
 
 const MANUAL_DURATION: Duration = Duration::from_secs(12 * 60 * 60);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const HOTPLUG_SETTLE: Duration = Duration::from_millis(250);
+const HOTPLUG_MAX_DELAY: Duration = Duration::from_secs(1);
 const RETRY_DELAY: Duration = Duration::from_secs(60);
 
 pub(crate) struct Request {
@@ -50,11 +52,17 @@ impl Devices for Monitors {
     }
 }
 
+struct PendingRefresh {
+    deadline: Instant,
+    limit: Instant,
+}
+
 struct Controller<D> {
     devices: D,
     mode: BacklightMode,
     deadline: Instant,
     refresh_deadline: Instant,
+    pending_refresh: Option<PendingRefresh>,
     last_refresh_started: Option<Instant>,
     last_refresh_error: Option<String>,
     last_awake_sample: std::time::Instant,
@@ -70,6 +78,7 @@ impl<D: Devices> Controller<D> {
             mode: BacklightMode::Auto,
             deadline: Instant::now(),
             refresh_deadline: Instant::now() + REFRESH_INTERVAL,
+            pending_refresh: None,
             last_refresh_started: None,
             last_refresh_error: None,
             last_awake_sample,
@@ -96,6 +105,7 @@ impl<D: Devices> Controller<D> {
     fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
         let started = std::time::Instant::now();
         self.last_refresh_started = Some(Instant::now());
+        self.pending_refresh = None;
         let result = self.devices.refresh(reason);
         let discovery_elapsed = started.elapsed();
         self.refresh_deadline = Instant::now() + REFRESH_INTERVAL;
@@ -130,8 +140,18 @@ impl<D: Devices> Controller<D> {
             self.mode = BacklightMode::Auto;
             self.devices.set_manual_target(None);
         }
-        if resumed || Instant::now() >= self.refresh_deadline {
-            let reason = if resumed { "resume" } else { "scheduled" };
+        let hotplug_due = self
+            .pending_refresh
+            .as_ref()
+            .is_some_and(|pending| Instant::now() >= pending.deadline);
+        if resumed || Instant::now() >= self.refresh_deadline || hotplug_due {
+            let reason = if resumed {
+                "resume"
+            } else if hotplug_due {
+                "hotplug"
+            } else {
+                "scheduled"
+            };
             if let Err(err) = self.refresh(reason) {
                 log::error!("Monitor refresh failed: {err}");
             }
@@ -144,6 +164,27 @@ impl<D: Devices> Controller<D> {
         }
     }
 
+    fn notify_hotplug(&mut self, received_at: Instant, now: Instant) {
+        if self
+            .last_refresh_started
+            .is_some_and(|started| received_at <= started)
+        {
+            return;
+        }
+        let pending = self.pending_refresh.get_or_insert(PendingRefresh {
+            deadline: now + HOTPLUG_SETTLE,
+            limit: now + HOTPLUG_MAX_DELAY,
+        });
+        pending.deadline = (now + HOTPLUG_SETTLE).min(pending.limit);
+    }
+
+    fn next_deadline(&self) -> Instant {
+        let deadline = self.deadline.min(self.refresh_deadline);
+        self.pending_refresh
+            .as_ref()
+            .map_or(deadline, |pending| deadline.min(pending.deadline))
+    }
+
     #[cfg(test)]
     fn command(&mut self, command: BacklightCommand) -> anyhow::Result<BacklightInfo> {
         self.command_at(command, Instant::now())
@@ -154,6 +195,10 @@ impl<D: Devices> Controller<D> {
         command: BacklightCommand,
         received_at: Instant,
     ) -> anyhow::Result<BacklightInfo> {
+        // Include a queued notification before checking its settling deadline.
+        if matches!(command, BacklightCommand::NotifyHotplug) {
+            self.notify_hotplug(received_at, Instant::now());
+        }
         self.service_deadlines();
         match command {
             BacklightCommand::SetBrightness(p)
@@ -189,7 +234,7 @@ impl<D: Devices> Controller<D> {
                     self.deadline = Instant::now() + MANUAL_DURATION;
                 }
             }
-            BacklightCommand::GetInfo => {}
+            BacklightCommand::GetInfo | BacklightCommand::NotifyHotplug => {}
             BacklightCommand::Refresh => {
                 // Only skip requests received before the last scan started.
                 // An event during that scan still requires one follow-up scan.
@@ -223,7 +268,7 @@ pub(crate) fn run_controller(receiver: Receiver<Request>) -> anyhow::Result<()> 
         log::error!("Initial monitor refresh failed: {err}");
     }
     loop {
-        let deadline = controller.deadline.min(controller.refresh_deadline);
+        let deadline = controller.next_deadline();
         match receiver.recv_until(deadline) {
             Ok(Some(request)) => {
                 let _ = request
@@ -395,6 +440,64 @@ mod tests {
             .command_at(BacklightCommand::Refresh, received_at)
             .is_err());
         assert_eq!(c.devices.refreshes, 1);
+    }
+
+    #[test]
+    fn hotplug_burst_waits_for_settling_and_cannot_starve_discovery() {
+        let mut c = controller();
+        let now = Instant::now();
+        for millis in [0, 100, 200, 400, 600, 800, 1000] {
+            let event = now + Duration::from_millis(millis);
+            c.notify_hotplug(event, event);
+            assert_eq!(
+                c.next_deadline(),
+                (event + HOTPLUG_SETTLE).min(now + HOTPLUG_MAX_DELAY)
+            );
+        }
+        assert_eq!(c.devices.refreshes, 0);
+        c.pending_refresh.as_mut().unwrap().deadline = Instant::now();
+        c.service_deadlines();
+        assert_eq!(c.devices.refreshes, 1);
+        assert!(c.pending_refresh.is_none());
+    }
+
+    #[test]
+    fn events_during_discovery_schedule_a_settled_follow_up() {
+        let mut c = controller();
+        let before = Instant::now();
+        c.refresh("resume").unwrap();
+        c.notify_hotplug(before, Instant::now());
+        assert!(c.pending_refresh.is_none());
+        // These represent notifications queued after discovery had begun.
+        let during = c.last_refresh_started.unwrap() + Duration::from_nanos(1);
+        for _ in 0..4 {
+            c.command_at(BacklightCommand::NotifyHotplug, during)
+                .unwrap();
+        }
+        assert_eq!(c.devices.refreshes, 1);
+        assert!(c.pending_refresh.is_some());
+        c.pending_refresh.as_mut().unwrap().deadline = Instant::now();
+        c.service_deadlines();
+        assert_eq!(c.devices.refreshes, 2);
+        // A later event is still honored, even during the follow-up scan.
+        let later = c.last_refresh_started.unwrap() + Duration::from_nanos(1);
+        c.command_at(BacklightCommand::NotifyHotplug, later)
+            .unwrap();
+        assert!(c.pending_refresh.is_some());
+    }
+
+    #[test]
+    fn explicit_refresh_covers_pending_hotplug_and_still_waits() {
+        let mut c = controller();
+        c.command(BacklightCommand::SetBrightness(85)).unwrap();
+        let deadline = c.deadline;
+        c.command(BacklightCommand::NotifyHotplug).unwrap();
+        c.devices.hardware_brightness = 70;
+        let info = c.command(BacklightCommand::Refresh).unwrap();
+        assert_eq!(info.brightness_percent, 70);
+        assert_eq!(c.devices.refreshes, 1);
+        assert!(c.pending_refresh.is_none());
+        assert_eq!(c.deadline, deadline);
     }
 
     #[test]

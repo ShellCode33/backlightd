@@ -23,9 +23,13 @@ struct BacklightctlCli {
     #[clap(long, default_value_t = false)]
     turn_on: bool,
 
-    /// Refresh the list of known monitors (called by the udev rule)
+    /// Refresh the list of known monitors and wait for completion
     #[clap(short, long, default_value_t = false)]
     refresh: bool,
+
+    /// Notify the daemon of a hotplug event without waiting for discovery (for udev)
+    #[clap(long, conflicts_with_all = ["brightness", "auto", "turn_off", "turn_on", "refresh", "json"])]
+    notify_hotplug: bool,
 
     /// UNIX socket path (for test purposes)
     #[clap(short, long, default_value = DEFAULT_UNIX_SOCKET_PATH)]
@@ -167,6 +171,14 @@ fn main() {
             exit(1);
         }
     };
+
+    if cli.notify_hotplug {
+        if let Err(err) = BacklightCommand::NotifyHotplug.serialize_into(&stream) {
+            eprintln!("{err}");
+            exit(1);
+        }
+        return;
+    }
 
     if cli.refresh {
         if let Err(err) = BacklightCommand::Refresh.serialize_into(&stream) {
