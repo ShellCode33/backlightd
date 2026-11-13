@@ -1,6 +1,6 @@
 /// The bible for DDC:
 /// https://milek7.pl/ddcbacklight/mccs.pdf
-use std::error::Error;
+use std::{error::Error, fmt::Display as ErrorDisplay, thread, time::Duration};
 
 use anyhow::bail;
 use ddc_hi::{Ddc, Display, FeatureCode};
@@ -12,6 +12,23 @@ const VCP_FEATURE_POWER: FeatureCode = 0xD6;
 const VCP_VALUE_POWER_ON: u16 = 0x1;
 const VCP_VALUE_POWER_OFF: u16 = 0x4;
 
+const INITIALIZATION_ATTEMPTS: usize = 3;
+const INITIALIZATION_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+fn probe_with_retries<T, E: ErrorDisplay>(
+    mut probe: impl FnMut() -> Result<T, E>,
+    mut wait: impl FnMut(),
+) -> Result<T, E> {
+    for attempt in 1..INITIALIZATION_ATTEMPTS {
+        match probe() {
+            Ok(value) => return Ok(value),
+            Err(err) => log::debug!("Brightness probe attempt={attempt} failed: {err}; retrying"),
+        }
+        wait();
+    }
+    probe()
+}
+
 pub(crate) struct BacklightDdcDevice {
     display: Display,
     max_brightness_raw: u16,
@@ -21,7 +38,10 @@ pub(crate) struct BacklightDdcDevice {
 
 impl BacklightDdcDevice {
     pub(crate) fn new(mut ddc_device: ddc_hi::Display) -> Result<Self, Box<dyn Error>> {
-        let brightness = ddc_device.handle.get_vcp_feature(VCP_FEATURE_BRIGHTNESS)?;
+        let brightness = probe_with_retries(
+            || ddc_device.handle.get_vcp_feature(VCP_FEATURE_BRIGHTNESS),
+            || thread::sleep(INITIALIZATION_RETRY_DELAY),
+        )?;
 
         Ok(Self {
             display: ddc_device,
@@ -83,5 +103,52 @@ impl BacklightDevice for BacklightDdcDevice {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_probe_error_recovers_without_repeating_successful_probe() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let value = probe_with_retries(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err("monitor not ready")
+                } else {
+                    Ok(95)
+                }
+            },
+            || waits += 1,
+        )
+        .unwrap();
+        assert_eq!((value, attempts, waits), (95, 2, 1));
+        assert_eq!(
+            probe_with_retries(
+                || Ok::<_, &str>(100),
+                || panic!("successful probe must not wait")
+            )
+            .unwrap(),
+            100
+        );
+    }
+
+    #[test]
+    fn permanent_probe_failure_has_a_bounded_retry_count() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let result: Result<(), _> = probe_with_retries(
+            || {
+                attempts += 1;
+                Err("monitor unavailable")
+            },
+            || waits += 1,
+        );
+        assert_eq!(result.unwrap_err(), "monitor unavailable");
+        assert_eq!((attempts, waits), (3, 2));
     }
 }
