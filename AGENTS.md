@@ -11,8 +11,8 @@ the user's live display session and should be explicitly coordinated.
 
 Read the current diff before editing and preserve unrelated user changes. Keep
 README.md short and user-facing; put architecture and contributor guidance here.
-Do not replace the intentional ACPI power-control `todo!()` calls with ordinary
-errors: the maintainer wants these to remain visible until implemented.
+Laptop power control uses `bl_power` (0 on, 4 off), independently of brightness.
+Do not emulate it by zeroing brightness or claim that it controls compositor DPMS.
 
 ## Workspace map
 

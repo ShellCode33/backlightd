@@ -169,19 +169,6 @@ fn replace_devices(
     failures
 }
 
-fn refresh_after_error(reason: &str, failed_ids: Vec<String>) {
-    let mut state = MONITORS.lock().unwrap();
-    if let Some(target) = state.manual_target {
-        state
-            .pending_inheritance
-            .extend(failed_ids.into_iter().map(|id| (id, target)));
-    }
-    drop(state);
-    if let Err(err) = refresh_monitors_list(reason) {
-        log::warn!("Recovery discovery incomplete: {err}");
-    }
-}
-
 // Use widened integer arithmetic for device scales up to u16::MAX.
 pub(crate) fn raw_to_percent(raw: u16, maximum: u16) -> anyhow::Result<u8> {
     anyhow::ensure!(maximum > 0, "Maximum brightness must be positive");
@@ -196,7 +183,7 @@ pub(crate) fn percent_to_raw(percent: u8, maximum: u16) -> anyhow::Result<u16> {
     Ok(if percent > 0 { raw.max(1) } else { 0 })
 }
 
-struct BrightnessFailure {
+struct DeviceFailure {
     error: anyhow::Error,
     ids: Vec<String>,
 }
@@ -204,7 +191,7 @@ struct BrightnessFailure {
 fn write_brightness(
     state: &mut MonitorState,
     target: impl Fn(u8) -> u8,
-) -> Result<(), BrightnessFailure> {
+) -> Result<(), DeviceFailure> {
     let mut failure = None;
     let mut failed_targets = Vec::new();
     for monitor in &mut state.devices {
@@ -230,7 +217,7 @@ fn write_brightness(
     if let Some(error) = failure {
         let ids = failed_targets.iter().map(|(id, _)| id.clone()).collect();
         state.pending_inheritance.extend(failed_targets);
-        Err(BrightnessFailure { error, ids })
+        Err(DeviceFailure { error, ids })
     } else {
         Ok(())
     }
@@ -238,7 +225,7 @@ fn write_brightness(
 
 fn brightness_recovery_result(
     state: &MonitorState,
-    failure: BrightnessFailure,
+    failure: DeviceFailure,
     discovery: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     if let Err(err) = discovery {
@@ -294,72 +281,90 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn turn_off() -> anyhow::Result<()> {
-    let mut last_error = None;
-    let mut failed_ids = Vec::new();
-
-    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
-        if let Err(err) = monitor.turn_off() {
-            log::error!("Unable to turn OFF monitor: {err}");
-            failed_ids.push(monitor.identity());
-            last_error = Some(err);
+fn write_power(
+    state: &mut MonitorState,
+    on: bool,
+    only: Option<&[String]>,
+) -> Result<(), DeviceFailure> {
+    let mut ids = Vec::new();
+    let mut error = None;
+    for monitor in &mut state.devices {
+        let id = monitor.identity();
+        if only.is_some_and(|ids| !ids.contains(&id)) {
+            continue;
+        }
+        let started = Instant::now();
+        let result = if on {
+            monitor.turn_on()
+        } else {
+            monitor.turn_off()
+        };
+        log::debug!(
+            "Power write: monitor={} id={id:?} on={on} success={} elapsed_ms={}",
+            monitor.name(),
+            result.is_ok(),
+            started.elapsed().as_millis()
+        );
+        if let Err(err) = result {
+            log::error!("Unable to set monitor power: id={id:?} on={on}: {err:#}");
+            ids.push(id);
+            error = Some(err);
         }
     }
-
-    if last_error.is_some() {
-        log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_after_error("turn_off_error", failed_ids);
-
-        last_error = None;
-        for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
-            if let Err(err) = monitor.turn_off() {
-                log::error!("Unable to turn OFF monitor: {err}");
-                last_error = Some(err);
-            }
-        }
-
-        if let Some(err) = last_error {
-            Err(err)
-        } else {
-            Ok(())
-        }
-    } else {
-        Ok(())
+    match error {
+        Some(error) => Err(DeviceFailure { error, ids }),
+        None => Ok(()),
     }
 }
 
-pub(crate) fn turn_on() -> anyhow::Result<()> {
-    let mut last_error = None;
-    let mut failed_ids = Vec::new();
-
-    for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
-        if let Err(err) = monitor.turn_on() {
-            log::error!("Unable to turn ON monitor: {err}");
-            failed_ids.push(monitor.identity());
-            last_error = Some(err);
-        }
+fn retry_power(
+    state: &mut MonitorState,
+    on: bool,
+    failure: DeviceFailure,
+    discovery: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    // Don't repeat writes to devices that already accepted the operation.
+    if let Err(retry) = write_power(state, on, Some(&failure.ids)) {
+        return Err(retry.error.context("Monitor power retry failed"));
     }
+    if let Err(err) = discovery {
+        return Err(failure
+            .error
+            .context(format!("Monitor power recovery discovery failed: {err}")));
+    }
+    if failure
+        .ids
+        .iter()
+        .any(|id| !state.devices.iter().any(|device| device.identity() == *id))
+    {
+        return Err(failure
+            .error
+            .context("Monitor power recovery could not find a failed monitor"));
+    }
+    Ok(())
+}
 
-    if last_error.is_some() {
-        log::info!("Trying to refresh monitors list to fix the error and retry...");
-        refresh_after_error("turn_on_error", failed_ids);
-
-        last_error = None;
-        for monitor in MONITORS.lock().unwrap().devices.iter_mut() {
-            if let Err(err) = monitor.turn_on() {
-                log::error!("Unable to turn ON monitor: {err}");
-                last_error = Some(err);
-            }
-        }
-
-        if let Some(err) = last_error {
-            Err(err)
+fn change_power(on: bool) -> anyhow::Result<()> {
+    let result = write_power(&mut MONITORS.lock().unwrap(), on, None);
+    if let Err(failure) = result {
+        log::info!("Rediscovering monitors to retry failed power writes...");
+        let reason = if on {
+            "turn_on_error"
         } else {
-            Ok(())
-        }
-    } else {
-        Ok(())
+            "turn_off_error"
+        };
+        let discovery = refresh_monitors_list(reason);
+        retry_power(&mut MONITORS.lock().unwrap(), on, failure, discovery)?;
     }
+    Ok(())
+}
+
+pub(crate) fn turn_off() -> anyhow::Result<()> {
+    change_power(false)
+}
+
+pub(crate) fn turn_on() -> anyhow::Result<()> {
+    change_power(true)
 }
 
 pub(crate) fn get_average_brightness() -> u8 {
@@ -383,10 +388,22 @@ pub(crate) fn get_average_brightness() -> u8 {
 mod tests {
     use super::*;
 
+    type PowerCalls = std::sync::Arc<Mutex<Vec<(&'static str, bool)>>>;
+
     struct FakeDevice {
         id: &'static str,
         brightness: u8,
         fail: bool,
+        power_calls: Option<PowerCalls>,
+    }
+    impl FakeDevice {
+        fn power(&self, on: bool) -> anyhow::Result<()> {
+            if let Some(calls) = &self.power_calls {
+                calls.lock().unwrap().push((self.id, on));
+            }
+            anyhow::ensure!(!self.fail, "power unavailable");
+            Ok(())
+        }
     }
     impl BacklightDevice for FakeDevice {
         fn identity(&self) -> String {
@@ -406,10 +423,10 @@ mod tests {
             self.brightness
         }
         fn turn_off(&mut self) -> anyhow::Result<()> {
-            Ok(())
+            self.power(false)
         }
         fn turn_on(&mut self) -> anyhow::Result<()> {
-            Ok(())
+            self.power(true)
         }
     }
     fn device(id: &'static str, brightness: u8, fail: bool) -> Box<dyn BacklightDevice + Send> {
@@ -417,7 +434,55 @@ mod tests {
             id,
             brightness,
             fail,
+            power_calls: None,
         })
+    }
+
+    #[test]
+    fn power_recovery_retries_only_failed_devices_and_reports_unresolved_errors() {
+        for on in [false, true] {
+            for outcome in ["success", "missing", "persistent", "partial"] {
+                let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+                let make = |id, fail| -> Box<dyn BacklightDevice + Send> {
+                    Box::new(FakeDevice {
+                        id,
+                        fail,
+                        brightness: 50,
+                        power_calls: Some(calls.clone()),
+                    })
+                };
+                let mut state = MonitorState {
+                    devices: vec![make("a", false), make("b", true)],
+                    manual_target: Some(50),
+                    pending_inheritance: vec![],
+                };
+                let failure = write_power(&mut state, on, None).err().unwrap();
+                assert_eq!(*calls.lock().unwrap(), vec![("a", on), ("b", on)]);
+                // a already accepted the command; c was newly discovered.
+                state.devices = vec![make("a", false), make("c", false)];
+                if outcome != "missing" {
+                    state.devices.push(make("b", outcome == "persistent"));
+                }
+                let discovery = if outcome == "partial" {
+                    Err(anyhow::anyhow!("partial scan"))
+                } else {
+                    Ok(())
+                };
+                let result = retry_power(&mut state, on, failure, discovery);
+                assert_eq!(
+                    result.is_ok(),
+                    outcome == "success",
+                    "{outcome}: {result:?}"
+                );
+                let expected = if outcome == "missing" { 2 } else { 3 };
+                let calls = calls.lock().unwrap();
+                assert_eq!(calls.len(), expected);
+                if calls.len() == 3 {
+                    assert_eq!(calls[2], ("b", on));
+                }
+                assert_eq!(state.manual_target, Some(50));
+            }
+        }
     }
 
     #[test]

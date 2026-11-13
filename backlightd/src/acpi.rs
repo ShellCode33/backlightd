@@ -1,6 +1,6 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 
 use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice};
 
@@ -14,6 +14,20 @@ pub(crate) struct BacklightAcpiDevice {
 }
 
 impl BacklightAcpiDevice {
+    fn set_power(&self, on: bool) -> anyhow::Result<()> {
+        let path = self.path.join("bl_power");
+        // Open without creating: a missing sysfs attribute is unsupported.
+        // See https://docs.kernel.org/gpu/backlight.html (BACKLIGHT_POWER_*).
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .with_context(|| {
+                format!("Unable to open backlight power control {}", path.display())
+            })?;
+        file.write_all(if on { b"0" } else { b"4" })
+            .with_context(|| format!("Unable to set backlight power through {}", path.display()))
+    }
+
     pub(crate) fn new(path: PathBuf) -> anyhow::Result<Self> {
         let max_brightness_path = path.join("max_brightness");
         let current_brightness_path = path.join("brightness");
@@ -69,11 +83,11 @@ impl BacklightDevice for BacklightAcpiDevice {
     }
 
     fn turn_off(&mut self) -> anyhow::Result<()> {
-        todo!()
+        self.set_power(false)
     }
 
     fn turn_on(&mut self) -> anyhow::Result<()> {
-        todo!()
+        self.set_power(true)
     }
 }
 
@@ -102,6 +116,35 @@ mod tests {
         fs::write(path.join("brightness"), "32768\n").unwrap();
         let mut device = BacklightAcpiDevice::new(path.clone()).unwrap();
         assert_eq!(device.get_brightness(), 50);
+        let power = path.join("bl_power");
+        assert!(device.turn_off().is_err());
+        assert!(device.turn_on().is_err());
+        assert!(!power.exists());
+        fs::write(&power, "0").unwrap();
+        device.turn_off().unwrap();
+        assert_eq!(fs::read_to_string(&power).unwrap(), "4");
+        assert_eq!(device.get_brightness(), 50);
+        assert_eq!(
+            fs::read_to_string(path.join("brightness")).unwrap(),
+            "32768\n"
+        );
+        device.turn_on().unwrap();
+        assert_eq!(fs::read_to_string(&power).unwrap(), "0");
+        assert_eq!(device.get_brightness(), 50);
+        fs::remove_file(&power).unwrap();
+        fs::create_dir(&power).unwrap();
+        assert!(device.turn_on().is_err());
+        fs::remove_dir(&power).unwrap();
+        // /dev/full accepts open but rejects writes, like a driver returning an error.
+        std::os::unix::fs::symlink("/dev/full", &power).unwrap();
+        assert!(device
+            .turn_on()
+            .unwrap_err()
+            .to_string()
+            .contains("Unable to set"));
+        assert!(device.turn_off().is_err());
+        fs::remove_file(&power).unwrap();
+
         device.set_brightness(100).unwrap();
         assert_eq!(
             fs::read_to_string(path.join("brightness")).unwrap(),
