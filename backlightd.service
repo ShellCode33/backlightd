@@ -9,7 +9,8 @@ ProtectSystem=strict
 ReadWritePaths=/var/cache /run
 ProtectHome=tmpfs
 PrivateTmp=true
-ProtectKernelTunables=true
+# Backlight brightness and power control require writable sysfs attributes.
+ProtectKernelTunables=false
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
