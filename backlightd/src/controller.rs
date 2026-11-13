@@ -12,6 +12,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(60);
 
 pub(crate) struct Request {
     pub command: BacklightCommand,
+    pub received_at: Instant,
     pub reply: Sender<anyhow::Result<BacklightInfo>>,
 }
 
@@ -51,6 +52,8 @@ struct Controller<D> {
     mode: BacklightMode,
     deadline: Instant,
     refresh_deadline: Instant,
+    last_refresh_started: Option<Instant>,
+    last_refresh_error: Option<String>,
 }
 
 impl<D: Devices> Controller<D> {
@@ -60,6 +63,8 @@ impl<D: Devices> Controller<D> {
             mode: BacklightMode::Auto,
             deadline: Instant::now(),
             refresh_deadline: Instant::now() + REFRESH_INTERVAL,
+            last_refresh_started: None,
+            last_refresh_error: None,
         }
     }
 
@@ -80,6 +85,7 @@ impl<D: Devices> Controller<D> {
 
     fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
         let started = std::time::Instant::now();
+        self.last_refresh_started = Some(Instant::now());
         let result = self.devices.refresh(reason);
         let discovery_elapsed = started.elapsed();
         self.refresh_deadline = Instant::now() + REFRESH_INTERVAL;
@@ -91,6 +97,7 @@ impl<D: Devices> Controller<D> {
                 Ok(())
             }
         });
+        self.last_refresh_error = result.as_ref().err().map(ToString::to_string);
         log::debug!("Refresh finished: reason={reason} mode={} success={} discovery_ms={} adjustment_ms={} total_ms={}", self.mode, result.is_ok(), discovery_elapsed.as_millis(), adjustment_started.elapsed().as_millis(), started.elapsed().as_millis());
         result
     }
@@ -109,7 +116,16 @@ impl<D: Devices> Controller<D> {
         }
     }
 
+    #[cfg(test)]
     fn command(&mut self, command: BacklightCommand) -> anyhow::Result<BacklightInfo> {
+        self.command_at(command, Instant::now())
+    }
+
+    fn command_at(
+        &mut self,
+        command: BacklightCommand,
+        received_at: Instant,
+    ) -> anyhow::Result<BacklightInfo> {
         self.service_deadlines();
         match command {
             BacklightCommand::SetBrightness(p)
@@ -131,7 +147,21 @@ impl<D: Devices> Controller<D> {
                 }
             }
             BacklightCommand::GetInfo => {}
-            BacklightCommand::Refresh => self.refresh("requested")?,
+            BacklightCommand::Refresh => {
+                // Only skip requests received before the last scan started.
+                // An event during that scan still requires one follow-up scan.
+                if self
+                    .last_refresh_started
+                    .is_some_and(|started| received_at <= started)
+                {
+                    log::debug!("Refresh coalesced: covered by a later discovery");
+                    if let Some(err) = &self.last_refresh_error {
+                        bail!("Refresh failed: {err}");
+                    }
+                } else {
+                    self.refresh("requested")?;
+                }
+            }
             BacklightCommand::TurnOnMonitors | BacklightCommand::TurnOffMonitors => {
                 self.devices.execute(command)?
             }
@@ -153,7 +183,9 @@ pub(crate) fn run_controller(receiver: Receiver<Request>) -> anyhow::Result<()> 
         let deadline = controller.deadline.min(controller.refresh_deadline);
         match receiver.recv_until(deadline) {
             Ok(Some(request)) => {
-                let _ = request.reply.send(controller.command(request.command));
+                let _ = request
+                    .reply
+                    .send(controller.command_at(request.command, request.received_at));
             }
             Ok(None) => controller.service_deadlines(),
             Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
@@ -220,6 +252,43 @@ mod tests {
         c.adjust().unwrap();
         c
     }
+    #[test]
+    fn queued_refreshes_are_coalesced_without_losing_later_events() {
+        let mut c = controller();
+        let before_scan = Instant::now();
+        c.refresh("test").unwrap();
+        c.command_at(BacklightCommand::Refresh, before_scan)
+            .unwrap();
+        assert_eq!(c.devices.refreshes, 1);
+        // A change received after the scan began must not be discarded.
+        let during_scan = c.last_refresh_started.unwrap() + Duration::from_nanos(1);
+        c.command_at(BacklightCommand::Refresh, during_scan)
+            .unwrap();
+        assert_eq!(c.devices.refreshes, 2);
+        c.command_at(BacklightCommand::Refresh, during_scan)
+            .unwrap();
+        assert_eq!(c.devices.refreshes, 2);
+    }
+
+    #[test]
+    fn scheduled_refresh_covers_an_already_queued_request() {
+        let mut c = controller();
+        c.refresh_deadline = Instant::now();
+        c.command(BacklightCommand::Refresh).unwrap();
+        assert_eq!(c.devices.refreshes, 1);
+    }
+
+    #[test]
+    fn coalesced_requests_preserve_refresh_errors() {
+        let mut c = controller();
+        c.devices.fail = true;
+        let received_at = Instant::now();
+        assert!(c.refresh("test").is_err());
+        assert!(c
+            .command_at(BacklightCommand::Refresh, received_at)
+            .is_err());
+    }
+
     #[test]
     fn overdue_refresh_and_manual_override_are_serviced_together() {
         let mut c = controller();

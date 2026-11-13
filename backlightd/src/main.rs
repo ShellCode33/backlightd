@@ -150,7 +150,11 @@ fn handle_client(
         let get_info = matches!(command, BacklightCommand::GetInfo);
         let (reply, response) = channel();
         sender
-            .send(Request { command, reply })
+            .send(Request {
+                command,
+                received_at: boot_time::Instant::now(),
+                reply,
+            })
             .map_err(|_| anyhow!("Brightness controller disconnected"))?;
         let result = response
             .recv()
