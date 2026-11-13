@@ -27,24 +27,59 @@ fn get_brightness_based_on_location(
 ) -> anyhow::Result<(u8, Duration)> {
     let coordinates =
         Coordinates::new(latitude, longitude).context("Invalid location coordinates")?;
-    let day = SolarDay::new(coordinates, now.date_naive());
-    let (Some(sunrise), Some(sunset)) = (
-        day.event_time(SolarEvent::Sunrise),
-        day.event_time(SolarEvent::Sunset),
-    ) else {
-        // Sunrise/sunset do not occur on every date at polar latitudes.
-        return Ok(get_brightness_based_on_time(now));
-    };
-    let sunrise_datetime = sunrise.with_timezone(&Local);
-    let sunset_datetime = sunset.with_timezone(&Local);
+    let date = now.date_naive();
+    let mut days = Vec::new();
+    for date in [date.pred_opt(), Some(date), date.succ_opt()]
+        .into_iter()
+        .flatten()
+    {
+        let day = SolarDay::new(coordinates, date);
+        let (Some(sunrise), Some(sunset)) = (
+            day.event_time(SolarEvent::Sunrise),
+            day.event_time(SolarEvent::Sunset),
+        ) else {
+            // A complete neighboring cycle is needed to check for overlap.
+            return Ok(get_brightness_based_on_time(now));
+        };
+        if sunrise >= sunset {
+            return Ok(get_brightness_based_on_time(now));
+        }
+        days.push((sunrise.with_timezone(&Local), sunset.with_timezone(&Local)));
+    }
+    Ok(solar_schedule(now, &days).unwrap_or_else(|| get_brightness_based_on_time(now)))
+}
 
-    Ok(scheduled_brightness(
-        now,
-        sunrise_datetime,
-        sunrise_datetime + BRIGHTNESS_TRANSITION_DURATION,
-        sunset_datetime,
-        sunset_datetime + BRIGHTNESS_TRANSITION_DURATION,
-    ))
+fn solar_schedule(
+    now: DateTime<Local>,
+    days: &[(DateTime<Local>, DateTime<Local>)],
+) -> Option<(u8, Duration)> {
+    // Keep the established four-hour ramps. If the surrounding solar cycles
+    // cannot fit them, let the caller use the regular clock-based schedule.
+    if days
+        .iter()
+        .any(|(sunrise, sunset)| *sunrise + BRIGHTNESS_TRANSITION_DURATION > *sunset)
+        || days
+            .windows(2)
+            .any(|pair| pair[0].1 + BRIGHTNESS_TRANSITION_DURATION > pair[1].0)
+    {
+        return None;
+    }
+    // Before today's sunrise, yesterday's sunset ramp can still be active.
+    let index = days
+        .iter()
+        .rposition(|(sunrise, _)| *sunrise <= now)
+        .unwrap_or(0);
+    let &(sunrise, sunset) = days.get(index)?;
+    let next_sunrise = days.get(index + 1).map(|(sunrise, _)| *sunrise);
+    let up_end = sunrise + BRIGHTNESS_TRANSITION_DURATION;
+    let down_end = sunset + BRIGHTNESS_TRANSITION_DURATION;
+    let (brightness, mut delay) = scheduled_brightness(now, sunrise, up_end, sunset, down_end);
+    if let Some(next) = next_sunrise {
+        if let Ok(until_sunrise) = (next - now).to_std() {
+            delay = delay.min(until_sunrise);
+        }
+    }
+    Some((brightness, delay))
 }
 
 fn get_brightness_based_on_time(now: DateTime<Local>) -> (u8, Duration) {
@@ -86,7 +121,7 @@ fn scheduled_brightness(
             + chrono::Duration::seconds(
                 ((up_end - up_begin).num_seconds() as f64 / 198.).ceil() as i64
             )
-    } else if now < up_end {
+    } else if now < up_end && brightness < 100 {
         up_begin
             + chrono::Duration::seconds(
                 (((brightness as f64 - 0.5) / 99.) * (up_end - up_begin).num_seconds() as f64)
@@ -124,7 +159,7 @@ fn compute_brightness_percentage(
     brightness_down_end: DateTime<Local>,
 ) -> u8 {
     assert!(brightness_up_begin < brightness_up_end);
-    assert!(brightness_up_end < brightness_down_begin);
+    assert!(brightness_up_end <= brightness_down_begin);
     assert!(brightness_down_begin < brightness_down_end);
 
     if now < brightness_up_begin || now > brightness_down_end {
@@ -149,6 +184,94 @@ mod tests {
     use chrono::Timelike;
 
     use super::*;
+
+    fn at(day: u32, hour: u32) -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local
+            .with_ymd_and_hms(2026, 12, day, hour, 0, 0)
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+    fn short_days_use_clock_fallback() {
+        let days = [(at(20, 11), at(20, 13)), (at(21, 11), at(21, 13))];
+        for now in [at(20, 11), at(20, 12), at(20, 13), at(20, 15), at(20, 17)] {
+            assert!(solar_schedule(now, &days).is_none());
+        }
+    }
+
+    #[test]
+    fn sunset_ramp_continues_across_midnight() {
+        let days = [(at(20, 6), at(20, 23)), (at(21, 6), at(21, 23))];
+        for (now, expected) in [
+            (at(20, 23), 100),
+            (at(21, 0), 75),
+            (at(21, 1), 51),
+            (at(21, 2), 26),
+            (at(21, 3), 1),
+        ] {
+            assert_eq!(solar_schedule(now, &days).unwrap().0, expected);
+        }
+        let before = at(21, 0) - Duration::from_secs(1);
+        let (_, delay) = solar_schedule(before, &days).unwrap();
+        assert_eq!(before + delay, at(21, 0));
+        let (_, delay) = solar_schedule(at(21, 0), &days).unwrap();
+        assert!(delay > Duration::ZERO);
+        assert_eq!(solar_schedule(at(21, 0) + delay, &days).unwrap().0, 74);
+    }
+
+    #[test]
+    fn location_schedule_keeps_previous_evening_brightness_after_midnight() {
+        let now = at(21, 0);
+        // Choose a longitude with sunset near 23:00 in the test's local zone.
+        let offset_hours = f64::from(now.offset().local_minus_utc()) / 3600.;
+        let longitude = ((offset_hours - 5.) * 15. + 180.).rem_euclid(360.) - 180.;
+        let (brightness, delay) = get_brightness_based_on_location(0., longitude, now).unwrap();
+        assert!(
+            (70..=80).contains(&brightness),
+            "midnight brightness: {brightness}"
+        );
+        assert!(delay > Duration::ZERO);
+    }
+
+    #[test]
+    fn short_nights_use_clock_fallback() {
+        let days = [(at(20, 1), at(20, 23)), (at(21, 1), at(21, 23))];
+        for now in [at(20, 12), at(21, 0), at(21, 1), at(21, 2)] {
+            assert!(solar_schedule(now, &days).is_none());
+        }
+    }
+
+    #[test]
+    fn real_short_winter_day_uses_clock_fallback() {
+        // At this latitude, the winter solstice has less than four hours of daylight.
+        let now = at(21, 12);
+        let coordinates = Coordinates::new(66., 0.).unwrap();
+        let day = SolarDay::new(coordinates, now.date_naive());
+        let sunrise = day.event_time(SolarEvent::Sunrise).unwrap();
+        let sunset = day.event_time(SolarEvent::Sunset).unwrap();
+        assert!(sunset - sunrise < chrono::Duration::hours(4));
+        assert_eq!(
+            get_brightness_based_on_location(66., 0., now).unwrap(),
+            get_brightness_based_on_time(now)
+        );
+    }
+
+    #[test]
+    fn real_short_summer_night_uses_clock_fallback() {
+        let now = at(21, 12);
+        let coordinates = Coordinates::new(-65., 0.).unwrap();
+        let today = SolarDay::new(coordinates, now.date_naive());
+        let tomorrow = SolarDay::new(coordinates, now.date_naive().succ_opt().unwrap());
+        let sunset = today.event_time(SolarEvent::Sunset).unwrap();
+        let sunrise = tomorrow.event_time(SolarEvent::Sunrise).unwrap();
+        assert!(sunrise - sunset < chrono::Duration::hours(4));
+        assert_eq!(
+            get_brightness_based_on_location(-65., 0., now).unwrap(),
+            get_brightness_based_on_time(now)
+        );
+    }
 
     #[test]
     fn upstream_solar_events_produce_a_schedule() {
@@ -176,13 +299,13 @@ mod tests {
     #[test]
     fn invalid_coordinates_return_errors() {
         for (latitude, longitude) in [(91., 0.), (0., 181.), (f64::NAN, 0.), (0., f64::INFINITY)] {
-            assert!(get_brightness_based_on_location(latitude, longitude, Local::now()).is_err());
+            assert!(get_brightness_based_on_location(latitude, longitude, at(21, 12)).is_err());
         }
     }
 
     #[test]
     fn schedule_wakes_at_next_integer_change_or_transition() {
-        let day = Local::now();
+        let day = at(21, 12);
         let at = |hour| {
             day.with_time(NaiveTime::from_hms_opt(hour, 0, 0).unwrap())
                 .unwrap()
@@ -199,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_fallback() {
-        let now = Local::now();
+        let now = at(21, 12);
         let brightness_up_begin = now
             .with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
             .unwrap();
@@ -254,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_exact_transition_points() {
-        let now = Local::now();
+        let now = at(21, 12);
         let brightness_up_begin = now
             .with_time(NaiveTime::from_hms_opt(6, 7, 8).unwrap())
             .unwrap();
