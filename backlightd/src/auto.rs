@@ -1,7 +1,8 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Local, NaiveTime};
-use sunrise::sunrise_sunset;
+use anyhow::Context;
+use chrono::{DateTime, Local, NaiveTime};
+use sunrise::{Coordinates, SolarDay, SolarEvent};
 
 use crate::location::find_location;
 
@@ -12,33 +13,41 @@ const FALLBACK_BRIGHTNESS_DOWN_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_op
 // Calculate both the target and the next time it can change. No hardware polling.
 pub(crate) fn next_adjustment() -> anyhow::Result<(u8, Duration)> {
     match find_location()? {
-        Some((latitude, longitude)) => Ok(get_brightness_based_on_location(latitude, longitude)),
-        None => Ok(get_brightness_based_on_time()),
+        Some((latitude, longitude)) => {
+            get_brightness_based_on_location(latitude, longitude, Local::now())
+        }
+        None => Ok(get_brightness_based_on_time(Local::now())),
     }
 }
 
-fn get_brightness_based_on_location(latitude: f64, longitude: f64) -> (u8, Duration) {
-    let now = Local::now();
-    let (sunrise_timestamp, sunset_timestamp) =
-        sunrise_sunset(latitude, longitude, now.year(), now.month(), now.day());
-    let sunrise_datetime: DateTime<Local> = DateTime::from_timestamp(sunrise_timestamp, 0)
-        .expect("failed to create datetime from sunrise timestamp")
-        .into();
-    let sunset_datetime: DateTime<Local> = DateTime::from_timestamp(sunset_timestamp, 0)
-        .expect("failed to create datetime from sunset timestamp")
-        .into();
+fn get_brightness_based_on_location(
+    latitude: f64,
+    longitude: f64,
+    now: DateTime<Local>,
+) -> anyhow::Result<(u8, Duration)> {
+    let coordinates =
+        Coordinates::new(latitude, longitude).context("Invalid location coordinates")?;
+    let day = SolarDay::new(coordinates, now.date_naive());
+    let (Some(sunrise), Some(sunset)) = (
+        day.event_time(SolarEvent::Sunrise),
+        day.event_time(SolarEvent::Sunset),
+    ) else {
+        // Sunrise/sunset do not occur on every date at polar latitudes.
+        return Ok(get_brightness_based_on_time(now));
+    };
+    let sunrise_datetime = sunrise.with_timezone(&Local);
+    let sunset_datetime = sunset.with_timezone(&Local);
 
-    scheduled_brightness(
+    Ok(scheduled_brightness(
         now,
         sunrise_datetime,
         sunrise_datetime + BRIGHTNESS_TRANSITION_DURATION,
         sunset_datetime,
         sunset_datetime + BRIGHTNESS_TRANSITION_DURATION,
-    )
+    ))
 }
 
-fn get_brightness_based_on_time() -> (u8, Duration) {
-    let now = Local::now();
+fn get_brightness_based_on_time(now: DateTime<Local>) -> (u8, Duration) {
     scheduled_brightness(
         now,
         now.with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
@@ -140,6 +149,36 @@ mod tests {
     use chrono::Timelike;
 
     use super::*;
+
+    #[test]
+    fn upstream_solar_events_produce_a_schedule() {
+        let now = DateTime::parse_from_rfc3339("2026-03-20T12:00:00+01:00")
+            .unwrap()
+            .with_timezone(&Local);
+        let (brightness, delay) = get_brightness_based_on_location(48.8566, 2.3522, now).unwrap();
+        assert!((1..=100).contains(&brightness));
+        assert!(delay > Duration::ZERO);
+    }
+
+    #[test]
+    fn missing_polar_events_use_clock_schedule() {
+        for date in ["2026-06-21T12:00:00+02:00", "2026-12-21T12:00:00+01:00"] {
+            let now = DateTime::parse_from_rfc3339(date)
+                .unwrap()
+                .with_timezone(&Local);
+            assert_eq!(
+                get_brightness_based_on_location(89., 0., now).unwrap(),
+                get_brightness_based_on_time(now)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_coordinates_return_errors() {
+        for (latitude, longitude) in [(91., 0.), (0., 181.), (f64::NAN, 0.), (0., f64::INFINITY)] {
+            assert!(get_brightness_based_on_location(latitude, longitude, Local::now()).is_err());
+        }
+    }
 
     #[test]
     fn schedule_wakes_at_next_integer_change_or_transition() {

@@ -102,7 +102,8 @@ fn find_ip_location() -> anyhow::Result<(f64, f64)> {
         let resp: IpApiResponse =
             ureq::get("http://ip-api.com/json/?fields=status,message,country,city,lat,lon")
                 .call()?
-                .into_json()?;
+                .body_mut()
+                .read_json()?;
 
         if resp.status != "success" {
             bail!("Unable to find location by IP: {:?}", resp.message);
@@ -165,4 +166,23 @@ pub(crate) fn find_location() -> anyhow::Result<Option<(f64, f64)>> {
         info!("Fallback to clock based brightness adjustement");
         None
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_cache_remains_compatible_with_previous_toml_format() {
+        let previous = "latitude = 48.8566\nlongitude = 2.3522\ntimestamp = 1730000000.0\n";
+        let cache: LastKnownLocation = toml::from_str(previous).unwrap();
+        assert_eq!(cache.latitude, 48.8566);
+        assert_eq!(cache.longitude, 2.3522);
+        assert_eq!(cache.timestamp, 1730000000.0);
+        let restored: LastKnownLocation =
+            toml::from_str(&toml::to_string(&cache).unwrap()).unwrap();
+        assert_eq!(restored.latitude, cache.latitude);
+        assert_eq!(restored.longitude, cache.longitude);
+        assert_eq!(restored.timestamp, cache.timestamp);
+    }
 }

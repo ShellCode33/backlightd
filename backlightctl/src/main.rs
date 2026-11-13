@@ -1,4 +1,4 @@
-use std::{os::unix::net::UnixStream, path::PathBuf, process::exit};
+use std::{io::BufReader, os::unix::net::UnixStream, path::PathBuf, process::exit};
 
 use backlight_ipc::{BacklightCommand, BacklightMode, DEFAULT_UNIX_SOCKET_PATH};
 use clap::{error::ErrorKind, CommandFactory, Parser};
@@ -204,7 +204,7 @@ fn main() {
         exit(1);
     }
 
-    let backlight_info = match BacklightCommand::deserialize_from(&stream) {
+    let backlight_info = match BacklightCommand::deserialize_from(BufReader::new(&stream)) {
         Ok(BacklightCommand::GetInfoResponse(info)) => info,
         Ok(BacklightCommand::ErrorResponse(err)) => {
             eprintln!("{err}");

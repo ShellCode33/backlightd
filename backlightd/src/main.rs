@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::{self, remove_file},
-    io,
+    io::{self, BufReader},
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -107,8 +107,9 @@ fn handle_clients_thread(listener: UnixListener, sender: Sender<Request>) {
 }
 
 fn handle_client(client: UnixStream, sender: &Sender<Request>) -> anyhow::Result<()> {
+    let mut reader = BufReader::new(&client);
     loop {
-        let command = BacklightCommand::deserialize_from(&client)
+        let command = BacklightCommand::deserialize_from(&mut reader)
             .map_err(|err| anyhow!("Unable to deserialize command: {err}"))?;
         if matches!(command, BacklightCommand::NotifyShutdown) {
             return Ok(());
@@ -158,7 +159,7 @@ mod tests {
             .send(Err(anyhow!("device unavailable")))
             .unwrap();
         assert!(
-            matches!(BacklightCommand::deserialize_from(&client).unwrap(), BacklightCommand::ErrorResponse(message) if message == "device unavailable")
+            matches!(BacklightCommand::deserialize_from(BufReader::new(&client)).unwrap(), BacklightCommand::ErrorResponse(message) if message == "device unavailable")
         );
         worker.join().unwrap().unwrap();
     }
@@ -186,7 +187,7 @@ mod tests {
         assert!(matches!(status.command, BacklightCommand::GetInfo));
         status.reply.send(Ok(info)).unwrap();
         assert!(
-            matches!(BacklightCommand::deserialize_from(&client).unwrap(), BacklightCommand::GetInfoResponse(value) if value.brightness_percent == 50 && value.mode == BacklightMode::Auto)
+            matches!(BacklightCommand::deserialize_from(BufReader::new(&client)).unwrap(), BacklightCommand::GetInfoResponse(value) if value.brightness_percent == 50 && value.mode == BacklightMode::Auto)
         );
         BacklightCommand::NotifyShutdown
             .serialize_into(&client)
