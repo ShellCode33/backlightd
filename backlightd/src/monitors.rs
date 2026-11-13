@@ -180,7 +180,7 @@ pub(crate) fn increase_brightness_percent(percent: u8) -> anyhow::Result<()> {
         refresh_after_error("increase_brightness_error");
         Err(err)
     } else {
-        log::info!("Brightness of all monitors has been set to {percent}%");
+        log::info!("Brightness of all monitors increased by {percent} percentage points");
         Ok(())
     }
 }
@@ -211,7 +211,7 @@ pub(crate) fn decrease_brightness_percent(percent: u8) -> anyhow::Result<()> {
         refresh_after_error("decrease_brightness_error");
         Err(err)
     } else {
-        log::info!("Brightness of all monitors has been set to {percent}%");
+        log::info!("Brightness of all monitors decreased by {percent} percentage points");
         Ok(())
     }
 }
