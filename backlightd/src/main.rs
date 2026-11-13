@@ -8,7 +8,7 @@ use std::{
     },
     process::exit,
     sync::mpsc::{channel, Sender},
-    thread::{self, sleep},
+    thread::{self, sleep, JoinHandle},
     time::Duration,
 };
 
@@ -85,12 +85,16 @@ fn create_unix_socket(unix_socket_path: &str) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
+const MAX_CLIENTS: usize = 16;
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn handle_clients_thread(listener: UnixListener, sender: Sender<Request>) {
+    let mut workers = Vec::new();
     for stream in listener.incoming() {
         match stream {
             Ok(client) => {
-                if let Err(err) = handle_client(client, &sender) {
-                    log::error!("{err}");
+                if let Err(err) = spawn_client(client, sender.clone(), &mut workers) {
+                    log::error!("Unable to serve client: {err}");
                 }
             }
             Err(err) => log::error!("Failed to accept incoming client: {err}"),
@@ -98,7 +102,37 @@ fn handle_clients_thread(listener: UnixListener, sender: Sender<Request>) {
     }
 }
 
-fn handle_client(client: UnixStream, sender: &Sender<Request>) -> anyhow::Result<()> {
+fn spawn_client(
+    client: UnixStream,
+    sender: Sender<Request>,
+    workers: &mut Vec<JoinHandle<()>>,
+) -> io::Result<()> {
+    workers.retain(|worker| !worker.is_finished());
+    if workers.len() >= MAX_CLIENTS {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Too many client connections",
+        ));
+    }
+    workers.push(
+        thread::Builder::new()
+            .name("backlight-client".into())
+            .spawn(move || {
+                if let Err(err) = handle_client(client, &sender, CLIENT_IO_TIMEOUT) {
+                    log::error!("{err}");
+                }
+            })?,
+    );
+    Ok(())
+}
+
+fn handle_client(
+    client: UnixStream,
+    sender: &Sender<Request>,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    client.set_read_timeout(Some(timeout))?;
+    client.set_write_timeout(Some(timeout))?;
     let mut reader = BufReader::new(&client);
     loop {
         let command = BacklightCommand::deserialize_from(&mut reader)
@@ -135,13 +169,90 @@ mod tests {
     use backlight_ipc::{BacklightInfo, BacklightMode};
 
     #[test]
+    fn idle_client_does_not_block_another_client() {
+        let (idle, idle_server) = UnixStream::pair().unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, receiver) = channel::<Request>();
+        let mut workers = Vec::new();
+        spawn_client(idle_server, sender.clone(), &mut workers).unwrap();
+        spawn_client(server, sender, &mut workers).unwrap();
+        BacklightCommand::GetInfo.serialize_into(&client).unwrap();
+        let request = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(request.command, BacklightCommand::GetInfo));
+        request
+            .reply
+            .send(Ok(BacklightInfo {
+                brightness_percent: 50,
+                mode: BacklightMode::Auto,
+            }))
+            .unwrap();
+        assert!(matches!(
+            BacklightCommand::deserialize_from(BufReader::new(&client)).unwrap(),
+            BacklightCommand::GetInfoResponse(_)
+        ));
+        BacklightCommand::NotifyShutdown
+            .serialize_into(&client)
+            .unwrap();
+        drop(idle);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn idle_and_partial_messages_time_out() {
+        for partial in [b"".as_slice(), b"{\"type\":"] {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            use std::io::Write;
+            client.write_all(partial).unwrap();
+            let (sender, _receiver) = channel();
+            // Keep the client connected while checking that the read expires.
+            let err = handle_client(server, &sender, Duration::from_millis(20)).unwrap_err();
+            assert!(err
+                .to_string()
+                .starts_with("Unable to deserialize command:"));
+        }
+    }
+
+    #[test]
+    fn connection_limit_rejects_excess_clients_and_releases_slots() {
+        let (sender, _receiver) = channel();
+        let mut workers = Vec::new();
+        let mut clients = Vec::new();
+        for _ in 0..MAX_CLIENTS {
+            let (client, server) = UnixStream::pair().unwrap();
+            spawn_client(server, sender.clone(), &mut workers).unwrap();
+            clients.push(client);
+        }
+        let (_excess, server) = UnixStream::pair().unwrap();
+        assert_eq!(
+            spawn_client(server, sender.clone(), &mut workers)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(clients.pop().unwrap());
+        workers.pop().unwrap().join().unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        spawn_client(server, sender, &mut workers).unwrap();
+        drop(client);
+        drop(clients);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn client_receives_controller_error_without_waiting_for_status() {
         let (client, server) = UnixStream::pair().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let (sender, receiver) = channel::<Request>();
-        let worker = thread::spawn(move || handle_client(server, &sender));
+        let worker = thread::spawn(move || handle_client(server, &sender, CLIENT_IO_TIMEOUT));
         BacklightCommand::SetMode(BacklightMode::Auto)
             .serialize_into(&client)
             .unwrap();
@@ -163,7 +274,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let (sender, receiver) = channel::<Request>();
-        let worker = thread::spawn(move || handle_client(server, &sender));
+        let worker = thread::spawn(move || handle_client(server, &sender, CLIENT_IO_TIMEOUT));
         BacklightCommand::SetMode(BacklightMode::Auto)
             .serialize_into(&client)
             .unwrap();
