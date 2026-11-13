@@ -1,11 +1,4 @@
-use std::{
-    fs::{self},
-    sync::Mutex,
-    thread,
-    time::Duration,
-};
-
-use boot_time::Instant;
+use std::{fs, sync::Mutex};
 
 use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
@@ -16,12 +9,6 @@ use crate::ddc::BacklightDdcDevice;
 /// in order to avoid unnecessary I/O.
 static MONITORS: Mutex<Vec<Box<dyn BacklightDevice + Send>>> = Mutex::new(Vec::new());
 
-/// The last time the list of known monitors was refreshed.
-static LAST_REFRESH: Mutex<Option<Instant>> = Mutex::new(None);
-
-/// The frequency at which the list of known monitors must be refreshed.
-const MONITORS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
-
 pub(crate) trait BacklightDevice {
     fn name(&self) -> String;
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()>;
@@ -30,27 +17,8 @@ pub(crate) trait BacklightDevice {
     fn turn_on(&mut self) -> anyhow::Result<()>;
 }
 
-pub(crate) fn auto_refresh_monitors_list() -> ! {
-    loop {
-        let must_refresh = {
-            let last_refresh = LAST_REFRESH
-                .lock()
-                .expect("Unable to acquire LAST_REFRESH mutex");
-
-            last_refresh.is_none()
-                || last_refresh.is_some_and(|dt| Instant::now() - dt > MONITORS_REFRESH_INTERVAL)
-        };
-
-        if must_refresh {
-            refresh_monitors_list();
-        }
-
-        thread::sleep(Duration::from_secs(10));
-    }
-}
-
 pub(crate) fn refresh_monitors_list() {
-    // Don't modify the global MONITORS variable directly to avoid locking the mutex for too long.
+    // Called only by the controller, including recovery after device errors.
     let mut new_monitors: Vec<Box<dyn BacklightDevice + Send>> = Vec::new();
 
     for ddc_device in ddc_hi::Display::enumerate() {
@@ -83,10 +51,6 @@ pub(crate) fn refresh_monitors_list() {
     let mut monitors = MONITORS.lock().expect("Unable to acquire MONITORS mutex");
     monitors.clear();
     monitors.extend(new_monitors);
-
-    *LAST_REFRESH
-        .lock()
-        .expect("Unable to acquire LAST_REFRESH mutex") = Some(Instant::now());
 }
 
 // Use widened integer arithmetic for device scales up to u16::MAX.

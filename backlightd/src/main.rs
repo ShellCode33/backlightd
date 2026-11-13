@@ -15,7 +15,6 @@ use std::{
 use anyhow::anyhow;
 use backlight_ipc::{BacklightCommand, DEFAULT_UNIX_SOCKET_PATH};
 use controller::{run_controller, Request};
-use monitors::auto_refresh_monitors_list;
 
 mod acpi;
 mod auto;
@@ -57,17 +56,10 @@ fn main() {
 
     let (auto_sender, auto_receiver) = channel();
 
-    monitors::refresh_monitors_list();
-
-    let auto_refresh_monitors_thread = thread::spawn(move || auto_refresh_monitors_list());
     let auto_adjust_thread = thread::spawn(move || run_controller(auto_receiver));
     let handle_clients_thread = thread::spawn(move || handle_clients_thread(listener, auto_sender));
 
     loop {
-        if auto_refresh_monitors_thread.is_finished() {
-            panic!("auto refresh monitors thread is gone");
-        }
-
         if auto_adjust_thread.is_finished() {
             panic!("auto adjust thread is gone");
         }
