@@ -1,11 +1,7 @@
 use std::{
     env,
-    fs::{self, remove_file},
     io::{self, BufReader},
-    os::unix::{
-        fs::PermissionsExt,
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::net::UnixStream,
     process::exit,
     sync::mpsc::channel,
     thread::{self, sleep, JoinHandle},
@@ -23,6 +19,7 @@ mod controller;
 mod ddc;
 mod location;
 mod monitors;
+mod socket;
 mod wake;
 
 fn main() {
@@ -48,7 +45,7 @@ fn main() {
         DEFAULT_UNIX_SOCKET_PATH
     };
 
-    let listener = match create_unix_socket(unix_socket_path) {
+    let listener = match socket::bind(std::path::Path::new(unix_socket_path)) {
         Ok(listener) => listener,
         Err(err) => {
             log::error!("{unix_socket_path}: {err}");
@@ -79,23 +76,10 @@ fn main() {
     }
 }
 
-fn create_unix_socket(unix_socket_path: &str) -> anyhow::Result<UnixListener> {
-    if let Err(err) = remove_file(unix_socket_path) {
-        if !matches!(err.kind(), io::ErrorKind::NotFound) {
-            return Err(anyhow!(err));
-        }
-    }
-
-    let listener = UnixListener::bind(unix_socket_path)?;
-    fs::set_permissions(unix_socket_path, fs::Permissions::from_mode(0o777))?;
-
-    Ok(listener)
-}
-
 const MAX_CLIENTS: usize = 16;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn handle_clients_thread(listener: UnixListener, sender: Sender<Request>) {
+fn handle_clients_thread(listener: socket::Listener, sender: Sender<Request>) {
     let mut workers = Vec::new();
     for stream in listener.incoming() {
         match stream {

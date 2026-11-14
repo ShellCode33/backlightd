@@ -28,6 +28,9 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
 - `backlightd/src/auto.rs`: solar/clock schedules and next adjustment deadlines.
 - `backlightd/src/location.rs`: environment configuration, IP lookup, persisted
   location, validation, timeouts, and retry backoff.
+- `backlightd/src/socket.rs`: filesystem socket ownership, stale-socket checks,
+  and a lifetime-held flock on a persistent `.lock` sidecar. Never unlink that
+  lock file during cleanup; concurrent processes may already have it open.
 - `backlightd/src/wake.rs`: command queue notifications via a Unix socket pair
   and suspend-aware deadline waits via libc timerfd/poll.
 - `backlightctl/src/main.rs`: CLI and IPC client.
