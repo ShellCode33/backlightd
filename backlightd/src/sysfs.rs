@@ -4,18 +4,18 @@ use anyhow::{bail, Context};
 
 use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice, RawBrightness};
 
-pub(crate) const ACPI_DEVICES_PATH: &str = "/sys/class/backlight";
+pub(crate) const SYSFS_BACKLIGHT_PATH: &str = "/sys/class/backlight";
 
-pub(crate) struct BacklightAcpiDevice {
+pub(crate) struct SysfsBacklightDevice {
     path: PathBuf,
-    max_brightness_raw: u16,
-    current_brightness_raw: u16,
+    max_brightness_raw: u32,
+    current_brightness_raw: u32,
     current_brightness_percent: u8,
-    readback_raw: Option<u16>,
-    actual_raw: Option<u16>,
+    readback_raw: Option<u32>,
+    actual_raw: Option<u32>,
 }
 
-impl BacklightAcpiDevice {
+impl SysfsBacklightDevice {
     fn set_power(&mut self, on: bool) -> anyhow::Result<()> {
         let path = self.path.join("bl_power");
         // Open without creating: a missing sysfs attribute is unsupported.
@@ -37,14 +37,14 @@ impl BacklightAcpiDevice {
         let current_brightness_path = path.join("brightness");
 
         let max_brightness_raw = match fs::read_to_string(&max_brightness_path) {
-            Ok(max_brightness) => max_brightness.trim().parse::<u16>()?,
+            Ok(max_brightness) => max_brightness.trim().parse::<u32>()?,
             Err(err) => {
                 bail!("{}: {err}", max_brightness_path.display());
             }
         };
 
         let current_brightness_raw = match fs::read_to_string(&current_brightness_path) {
-            Ok(current_brightness) => current_brightness.trim().parse::<u16>()?,
+            Ok(current_brightness) => current_brightness.trim().parse::<u32>()?,
             Err(err) => {
                 bail!("{}: {err}", current_brightness_path.display());
             }
@@ -52,7 +52,7 @@ impl BacklightAcpiDevice {
 
         let actual_raw = fs::read_to_string(path.join("actual_brightness"))
             .ok()
-            .and_then(|value| value.trim().parse::<u16>().ok())
+            .and_then(|value| value.trim().parse::<u32>().ok())
             .filter(|value| *value <= max_brightness_raw);
         Ok(Self {
             readback_raw: Some(current_brightness_raw),
@@ -65,8 +65,9 @@ impl BacklightAcpiDevice {
     }
 }
 
-impl BacklightDevice for BacklightAcpiDevice {
+impl BacklightDevice for SysfsBacklightDevice {
     fn identity(&self) -> String {
+        // Keep the public ID stable for existing per-device configuration rules.
         format!("acpi:{}", self.path.display())
     }
 
@@ -81,7 +82,7 @@ impl BacklightDevice for BacklightAcpiDevice {
             actual: self.actual_raw,
         }
     }
-    fn set_raw_brightness(&mut self, new_brightness: u16) -> anyhow::Result<()> {
+    fn set_raw_brightness(&mut self, new_brightness: u32) -> anyhow::Result<()> {
         anyhow::ensure!(
             new_brightness <= self.max_brightness_raw,
             "Brightness exceeds hardware maximum"
@@ -137,10 +138,14 @@ mod tests {
         fs::create_dir(&path).unwrap();
         let fixture = Fixture(path);
         let path = &fixture.0;
-        fs::write(path.join("max_brightness"), "65535\n").unwrap();
-        fs::write(path.join("brightness"), "32768\n").unwrap();
-        let mut device = BacklightAcpiDevice::new(path.clone()).unwrap();
+        fs::write(path.join("max_brightness"), "200000\n").unwrap();
+        fs::write(path.join("brightness"), "100000\n").unwrap();
+        fs::write(path.join("actual_brightness"), "90000\n").unwrap();
+        let mut device = SysfsBacklightDevice::new(path.clone()).unwrap();
         assert_eq!(device.get_brightness(), 50);
+        assert_eq!(device.raw_brightness().actual, Some(90000));
+        assert_eq!(device.raw_brightness().readback, Some(100000));
+        assert!(device.identity().starts_with("acpi:"));
         let power = path.join("bl_power");
         assert!(device.turn_off().is_err());
         assert!(device.turn_on().is_err());
@@ -151,7 +156,7 @@ mod tests {
         assert_eq!(device.get_brightness(), 50);
         assert_eq!(
             fs::read_to_string(path.join("brightness")).unwrap(),
-            "32768\n"
+            "100000\n"
         );
         device.turn_on().unwrap();
         assert_eq!(fs::read_to_string(&power).unwrap(), "0");
@@ -173,24 +178,28 @@ mod tests {
         device.set_brightness(100).unwrap();
         assert_eq!(
             fs::read_to_string(path.join("brightness")).unwrap(),
-            "65535"
+            "200000"
         );
+        let reread = SysfsBacklightDevice::new(path.clone()).unwrap();
+        assert_eq!(reread.raw_brightness().value, 200000);
+        assert_eq!(reread.get_brightness(), 100);
+        assert!(device.set_raw_brightness(200001).is_err());
         assert!(device.set_brightness(101).is_err());
         assert_eq!(device.get_brightness(), 100);
         assert_eq!(
             fs::read_to_string(path.join("brightness")).unwrap(),
-            "65535"
+            "200000"
         );
 
         fs::write(path.join("max_brightness"), "3\n").unwrap();
         fs::write(path.join("brightness"), "1\n").unwrap();
-        let mut device = BacklightAcpiDevice::new(path.clone()).unwrap();
+        let mut device = SysfsBacklightDevice::new(path.clone()).unwrap();
         device.set_brightness(1).unwrap();
         assert_eq!(fs::read_to_string(path.join("brightness")).unwrap(), "1");
         fs::write(path.join("brightness"), "4\n").unwrap();
-        assert!(BacklightAcpiDevice::new(path.clone()).is_err());
+        assert!(SysfsBacklightDevice::new(path.clone()).is_err());
         fs::write(path.join("max_brightness"), "0\n").unwrap();
         fs::write(path.join("brightness"), "0\n").unwrap();
-        assert!(BacklightAcpiDevice::new(path.clone()).is_err());
+        assert!(SysfsBacklightDevice::new(path.clone()).is_err());
     }
 }

@@ -18,7 +18,6 @@ use backlight_ipc::{BacklightCommand, DEFAULT_UNIX_SOCKET_PATH};
 use controller::{run_controller, Request};
 use wake::Sender;
 
-mod acpi;
 mod auto;
 mod calibration;
 mod config;
@@ -28,6 +27,7 @@ mod location;
 mod monitors;
 mod shutdown;
 mod socket;
+mod sysfs;
 mod wake;
 
 fn main() {

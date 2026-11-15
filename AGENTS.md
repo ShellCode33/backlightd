@@ -11,6 +11,9 @@ the user's live display session and should be explicitly coordinated.
 
 Read the current diff before editing and preserve unrelated user changes. Keep
 README.md short and user-facing; put architecture and contributor guidance here.
+Sysfs raw brightness uses `u32`; shared percentage arithmetic uses `u64`.
+DDC narrows values with a checked conversion at its 16-bit protocol boundary.
+Legacy `acpi:` device IDs remain stable for existing configuration rules.
 Laptop power control uses `bl_power` (0 on, 4 off), independently of brightness.
 Do not emulate it by zeroing brightness or claim that it controls compositor DPMS.
 
@@ -32,7 +35,7 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
   inheritance, failed-device recovery, and brightness conversion helpers.
 - `backlightd/src/ddc.rs`: external monitors via `ddc-hi`; VCP 0x10 is brightness,
   VCP 0xD6 is power. Initialization retries transient brightness-probe failures.
-- `backlightd/src/acpi.rs`: laptop backlight through `/sys/class/backlight`.
+- `backlightd/src/sysfs.rs`: laptop backlight through `/sys/class/backlight`.
 - `backlightd/src/auto.rs`: solar/clock schedules and next adjustment deadlines.
 - `backlightd/src/location.rs`: environment configuration, IP lookup, persisted
   location, validation, timeouts, and retry backoff.
@@ -89,7 +92,7 @@ so coarse hardware steps do not prevent small repeated adjustments. Discovery
 preserves this intent only if calibration and the observed raw value are unchanged;
 an external raw change resets it. Disabled devices remain discoverable/listed but
 are excluded from writes and averages. Detailed device data separates requested,
-representable, raw control readback, and optional ACPI actual readings. A write
+representable, raw control readback, and optional sysfs actual readings. A write
 clears its readback evidence; do not label representable output as verified.
 `GetDeviceInfo(index)` returns one optional device in `GetInfoResponse.device`,
 allowing --devices to enumerate without exceeding the per-message limit. Normal

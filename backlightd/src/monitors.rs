@@ -1,7 +1,7 @@
 use std::{fs, sync::Mutex, time::Instant};
 
-use crate::acpi::{BacklightAcpiDevice, ACPI_DEVICES_PATH};
 use crate::ddc::BacklightDdcDevice;
+use crate::sysfs::{SysfsBacklightDevice, SYSFS_BACKLIGHT_PATH};
 
 /// Holds the current backlight state of all monitors.
 ///
@@ -39,13 +39,13 @@ pub(crate) trait BacklightDevice {
     }
     fn raw_brightness(&self) -> RawBrightness {
         RawBrightness {
-            value: u16::from(self.get_brightness()),
+            value: u32::from(self.get_brightness()),
             maximum: 100,
             readback: None,
             actual: None,
         }
     }
-    fn set_raw_brightness(&mut self, raw: u16) -> anyhow::Result<()> {
+    fn set_raw_brightness(&mut self, raw: u32) -> anyhow::Result<()> {
         self.set_brightness(raw_to_percent(raw, self.raw_brightness().maximum)?)
     }
     fn name(&self) -> String;
@@ -57,10 +57,10 @@ pub(crate) trait BacklightDevice {
 
 #[derive(Clone, Copy)]
 pub(crate) struct RawBrightness {
-    pub value: u16,
-    pub maximum: u16,
-    pub readback: Option<u16>,
-    pub actual: Option<u16>,
+    pub value: u32,
+    pub maximum: u32,
+    pub readback: Option<u32>,
+    pub actual: Option<u32>,
 }
 
 pub(crate) fn device_info(index: usize) -> Option<backlight_ipc::DeviceInfo> {
@@ -114,17 +114,17 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
         }
     }
 
-    let acpi_started = Instant::now();
-    match fs::read_dir(ACPI_DEVICES_PATH) {
+    let sysfs_started = Instant::now();
+    match fs::read_dir(SYSFS_BACKLIGHT_PATH) {
         Ok(dir) => {
             for entry in dir {
                 match entry {
                     Ok(file) => {
                         let path = file.path();
                         let device_started = Instant::now();
-                        let result = BacklightAcpiDevice::new(path.clone());
+                        let result = SysfsBacklightDevice::new(path.clone());
                         log::debug!(
-                            "Discovery stage=acpi_initialization path={} success={} elapsed_ms={}",
+                            "Discovery stage=sysfs_initialization path={} success={} elapsed_ms={}",
                             path.display(),
                             result.is_ok(),
                             device_started.elapsed().as_millis()
@@ -133,13 +133,13 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
                             Ok(monitor) => new_monitors.push(Box::new(monitor)),
                             Err(err) => {
                                 failures += 1;
-                                log::error!("Failed to retrieve ACPI backlight monitor: {err}")
+                                log::error!("Failed to retrieve sysfs backlight device: {err}")
                             }
                         }
                     }
                     Err(err) => {
                         failures += 1;
-                        log::error!("Unable to read entry from {ACPI_DEVICES_PATH}: {err}");
+                        log::error!("Unable to read entry from {SYSFS_BACKLIGHT_PATH}: {err}");
                     }
                 }
             }
@@ -147,13 +147,13 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
             failures += 1;
-            log::error!("{ACPI_DEVICES_PATH}: {err}");
+            log::error!("{SYSFS_BACKLIGHT_PATH}: {err}");
         }
     }
 
     log::debug!(
-        "Discovery stage=acpi_scan elapsed_ms={}",
-        acpi_started.elapsed().as_millis()
+        "Discovery stage=sysfs_scan elapsed_ms={}",
+        sysfs_started.elapsed().as_millis()
     );
     let mut monitors = MONITORS.lock().expect("Unable to acquire MONITORS mutex");
     let config = crate::config::current();
@@ -244,17 +244,17 @@ fn replace_devices(
     failures
 }
 
-// Use widened integer arithmetic for device scales up to u16::MAX.
-pub(crate) fn raw_to_percent(raw: u16, maximum: u16) -> anyhow::Result<u8> {
+// Use widened integer arithmetic for device scales up to u32::MAX.
+pub(crate) fn raw_to_percent(raw: u32, maximum: u32) -> anyhow::Result<u8> {
     anyhow::ensure!(maximum > 0, "Maximum brightness must be positive");
     anyhow::ensure!(raw <= maximum, "Brightness exceeds device maximum");
-    Ok(((u32::from(raw) * 100 + u32::from(maximum) / 2) / u32::from(maximum)) as u8)
+    Ok(((u64::from(raw) * 100 + u64::from(maximum) / 2) / u64::from(maximum)) as u8)
 }
 
-pub(crate) fn percent_to_raw(percent: u8, maximum: u16) -> anyhow::Result<u16> {
+pub(crate) fn percent_to_raw(percent: u8, maximum: u32) -> anyhow::Result<u32> {
     anyhow::ensure!(percent <= 100, "Brightness percentage must not exceed 100");
     anyhow::ensure!(maximum > 0, "Maximum brightness must be positive");
-    let raw = ((u32::from(percent) * u32::from(maximum) + 50) / 100) as u16;
+    let raw = ((u64::from(percent) * u64::from(maximum) + 50) / 100) as u32;
     Ok(if percent > 0 { raw.max(1) } else { 0 })
 }
 
@@ -784,18 +784,18 @@ mod tests {
 
     #[test]
     fn device_scale_boundaries_and_invalid_values() {
-        assert_eq!(raw_to_percent(u16::MAX, u16::MAX).unwrap(), 100);
-        assert_eq!(raw_to_percent(0, u16::MAX).unwrap(), 0);
+        assert_eq!(raw_to_percent(u32::MAX, u32::MAX).unwrap(), 100);
+        assert_eq!(raw_to_percent(0, u32::MAX).unwrap(), 0);
         assert_eq!(raw_to_percent(1, 3).unwrap(), 33);
         assert_eq!(raw_to_percent(2, 3).unwrap(), 67);
         assert!(raw_to_percent(0, 0).is_err());
         assert!(raw_to_percent(101, 100).is_err());
         assert!(percent_to_raw(101, 100).is_err());
         assert!(percent_to_raw(1, 0).is_err());
-        assert_eq!(percent_to_raw(100, u16::MAX).unwrap(), u16::MAX);
+        assert_eq!(percent_to_raw(100, u32::MAX).unwrap(), u32::MAX);
         assert_eq!(percent_to_raw(50, 3).unwrap(), 2);
         assert_eq!(percent_to_raw(0, 3).unwrap(), 0);
-        for maximum in [1, 3, 100, u16::MAX] {
+        for maximum in [1, 3, 100, u32::MAX] {
             for percent in 1..=100 {
                 let raw = percent_to_raw(percent, maximum).unwrap();
                 assert!((1..=maximum).contains(&raw));

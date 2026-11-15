@@ -35,10 +35,10 @@ pub struct DeviceInfo {
     pub requested_percent: Option<u8>,
     pub brightness_percent: u8,
     pub hardware_percent: u8,
-    pub hardware_raw: u16,
-    pub maximum_raw: u16,
-    pub readback_raw: Option<u16>,
-    pub actual_raw: Option<u16>,
+    pub hardware_raw: u32,
+    pub maximum_raw: u32,
+    pub readback_raw: Option<u32>,
+    pub actual_raw: Option<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -183,6 +183,37 @@ mod tests {
             assert_eq!(serde_json::to_string(&command).unwrap(), expected);
         }
         assert!(BacklightCommand::deserialize_from(&mut reader).is_err());
+    }
+
+    #[test]
+    fn device_readings_larger_than_16_bits_round_trip() {
+        let command = BacklightCommand::GetInfoResponse(BacklightInfo {
+            brightness_percent: 50,
+            mode: BacklightMode::Manual,
+            device: Some(DeviceInfo {
+                id: "acpi:test".into(),
+                name: "sysfs".into(),
+                enabled: true,
+                requested_percent: Some(50),
+                brightness_percent: 50,
+                hardware_percent: 50,
+                hardware_raw: 100000,
+                maximum_raw: 200000,
+                readback_raw: Some(100000),
+                actual_raw: Some(90000),
+            }),
+        });
+        let mut wire = Vec::new();
+        command.serialize_into(&mut wire).unwrap();
+        let BacklightCommand::GetInfoResponse(info) =
+            BacklightCommand::deserialize_from(Cursor::new(wire)).unwrap()
+        else {
+            panic!("wrong response")
+        };
+        let device = info.device.unwrap();
+        assert_eq!(device.hardware_raw, 100000);
+        assert_eq!(device.maximum_raw, 200000);
+        assert_eq!(device.actual_raw, Some(90000));
     }
 
     #[test]

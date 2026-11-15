@@ -2,7 +2,7 @@
 /// https://milek7.pl/ddcbacklight/mccs.pdf
 use std::{error::Error, fmt::Display as ErrorDisplay, thread, time::Duration};
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use ddc_hi::{Ddc, Display, FeatureCode};
 
 use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice, RawBrightness};
@@ -51,7 +51,10 @@ impl BacklightDdcDevice {
             display: ddc_device,
             max_brightness_raw: brightness.maximum(),
             current_brightness_raw: brightness.value(),
-            current_brightness_percent: raw_to_percent(brightness.value(), brightness.maximum())?,
+            current_brightness_percent: raw_to_percent(
+                brightness.value().into(),
+                brightness.maximum().into(),
+            )?,
         })
     }
 }
@@ -76,16 +79,18 @@ impl BacklightDevice for BacklightDdcDevice {
     }
     fn raw_brightness(&self) -> RawBrightness {
         RawBrightness {
-            value: self.current_brightness_raw,
-            maximum: self.max_brightness_raw,
-            readback: self.readback_raw,
-            actual: self.actual_raw,
+            value: self.current_brightness_raw.into(),
+            maximum: self.max_brightness_raw.into(),
+            readback: self.readback_raw.map(u32::from),
+            actual: self.actual_raw.map(u32::from),
         }
     }
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
-        self.set_raw_brightness(percent_to_raw(percent, self.max_brightness_raw)?)
+        self.set_raw_brightness(percent_to_raw(percent, self.max_brightness_raw.into())?)
     }
-    fn set_raw_brightness(&mut self, new_brightness: u16) -> anyhow::Result<()> {
+    fn set_raw_brightness(&mut self, new_brightness: u32) -> anyhow::Result<()> {
+        let new_brightness = u16::try_from(new_brightness)
+            .context("DDC brightness exceeds the 16-bit protocol limit")?;
         anyhow::ensure!(
             new_brightness <= self.max_brightness_raw,
             "Brightness exceeds hardware maximum"
@@ -100,7 +105,8 @@ impl BacklightDevice for BacklightDdcDevice {
         }
 
         self.current_brightness_raw = new_brightness;
-        self.current_brightness_percent = raw_to_percent(new_brightness, self.max_brightness_raw)?;
+        self.current_brightness_percent =
+            raw_to_percent(new_brightness.into(), self.max_brightness_raw.into())?;
         self.readback_raw = None;
         self.actual_raw = None;
         Ok(())

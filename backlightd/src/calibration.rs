@@ -30,7 +30,7 @@ struct Calibrated {
     requested: Option<u8>,
 }
 impl Calibration {
-    fn to_raw(&self, percent: u8, maximum: u16) -> anyhow::Result<u16> {
+    fn to_raw(&self, percent: u8, maximum: u32) -> anyhow::Result<u32> {
         anyhow::ensure!(
             percent <= 100 && maximum > 0,
             "Invalid brightness or hardware maximum"
@@ -38,7 +38,7 @@ impl Calibration {
         let value = f64::from(self.minimum_percent)
             + f64::from(self.maximum_percent - self.minimum_percent)
                 * (f64::from(percent) / 100.).powf(self.exponent);
-        let raw = (value / 100. * f64::from(maximum)).round() as u16;
+        let raw = (value / 100. * f64::from(maximum)).round() as u32;
         Ok(if value > 0. { raw.max(1) } else { 0 })
     }
     fn logical_percent(&self, raw: RawBrightness) -> u8 {
@@ -124,7 +124,7 @@ mod tests {
         fn set_brightness(&mut self, p: u8) -> anyhow::Result<()> {
             self.set_raw_brightness(crate::monitors::percent_to_raw(p, self.0.maximum)?)
         }
-        fn set_raw_brightness(&mut self, raw: u16) -> anyhow::Result<()> {
+        fn set_raw_brightness(&mut self, raw: u32) -> anyhow::Result<()> {
             self.0.value = raw;
             self.0.readback = None;
             Ok(())
@@ -147,11 +147,11 @@ mod tests {
         assert_eq!(mapping.to_raw(50, 10000).unwrap(), 3500);
         assert_eq!(mapping.to_raw(100, 10000).unwrap(), 8000);
         for percent in 0..=100 {
-            let raw = mapping.to_raw(percent, 65535).unwrap();
+            let raw = mapping.to_raw(percent, 200000).unwrap();
             assert_eq!(
                 mapping.logical_percent(RawBrightness {
                     value: raw,
-                    maximum: 65535,
+                    maximum: 200000,
                     readback: None,
                     actual: None
                 }),
