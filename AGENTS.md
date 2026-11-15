@@ -147,8 +147,11 @@ crates or push the separate wiki repository without explicit authorization.
 
 ## Build and validation
 
-The workspace declares Rust 1.86 as its minimum version. Linux builds need a C
-toolchain, pkg-config, and libudev development files. Use the lockfile.
+Use the latest stable Rust toolchain, selected by `rust-toolchain.toml`; older
+compiler versions are not supported. CI and native packaging use stable. Nix
+selects stable through rust-overlay, pinned by `flake.lock`; update that input
+when a new stable compiler is released. Linux builds need a C toolchain,
+pkg-config, and libudev development files. Use the Cargo lockfile.
 
 ```sh
 cargo fmt --all -- --check

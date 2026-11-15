@@ -6,7 +6,7 @@ rustPlatform.buildRustPackage {
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
-      ../Cargo.toml ../Cargo.lock ../Makefile ../LICENSE ../README.md
+      ../Cargo.toml ../Cargo.lock ../rust-toolchain.toml ../Makefile ../LICENSE ../README.md
       ../backlightd ../backlightctl ../backlight_ipc ../etc ../docs
     ];
   };
@@ -14,7 +14,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkg-config ];
   buildInputs = [ udev ];
   doCheck = true;
-  RUST_TEST_THREADS = "1";
+  dontUseCargoParallelTests = true;
   installPhase = ''
     runHook preInstall
     make install BUILD_DIR=target/${stdenv.hostPlatform.rust.rustcTarget}/release PREFIX=$out INSTALL_PREFIX=$out/bin \

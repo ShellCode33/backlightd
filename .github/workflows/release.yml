@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.source.outputs.version }}
-      msrv: ${{ steps.source.outputs.msrv }}
       epoch: ${{ steps.source.outputs.epoch }}
       prerelease: ${{ steps.source.outputs.prerelease }}
     steps:
@@ -91,7 +90,7 @@ jobs:
           path: source-release
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ needs.source.outputs.msrv }}
+          toolchain: stable
           cache: false
       - name: Build, install, reinstall, and remove in target distribution
         env:

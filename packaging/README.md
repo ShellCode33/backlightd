@@ -12,7 +12,7 @@ repository packages. There is no automatic update repository or signing key yet.
 ## Release procedure
 
 1. Set the same version in all three workspace member `Cargo.toml` files and
-   refresh `Cargo.lock`. Keep the minimum Rust version accurate in root `Cargo.toml`.
+   refresh `Cargo.lock`. Use the latest stable Rust toolchain.
 2. Commit and push the reviewed changes. Push a matching tag, e.g. `v0.1.0`.
 3. The `Release packages` workflow runs the existing tests/linters, builds native
    packages, and checks the Nix package/module. Every native package is installed,
@@ -36,11 +36,14 @@ not a detached cryptographic signature. Packages are currently unsigned.
 Nix users consume the versioned flake and its `flake.lock`, not a foreign binary
 package. `nix build` and `nix flake check` work for both supported Linux CPUs.
 The NixOS module reuses the packaged unit and generates TOML configuration.
+Nix uses rust-overlay to select stable Rust independently of the NixOS compiler.
+Update it with `nix flake update rust-overlay` when a new stable compiler is
+released; the lockfile keeps individual Nix builds reproducible.
 
 ## Build design
 
 Native builds run in the target distribution container on a runner matching its
-CPU. Rust is pinned to the workspace minimum and mounted read-only from the
+CPU. Rust uses the latest stable toolchain and is mounted read-only from the
 runner; GCC, libudev headers, and other native libraries come from the container.
 This prevents accidentally requiring a newer host glibc in a Debian/Ubuntu binary.
 `--locked` is used throughout. Tests are serialized to keep forked signal-test

@@ -55,6 +55,8 @@ nix build
 nix flake check
 ```
 
-Nix builds from the locked Rust dependencies and native system inputs. GitHub
-releases provide the versioned source and flake; there is no separate binary
+Nix builds from the locked Rust dependencies and native system inputs. The flake
+selects stable Rust through rust-overlay; updating that flake input picks up a new
+stable compiler while retaining reproducible builds for each committed lockfile.
+GitHub releases provide the versioned source and flake; there is no separate binary
 cache maintained by this project.

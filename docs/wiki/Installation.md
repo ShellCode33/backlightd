@@ -67,7 +67,7 @@ intentional local overrides, then reload systemd/udev. Keep your configuration.
 
 ## Build and install from source
 
-Install Rust 1.86+, Cargo, a C toolchain, pkg-config, and libudev development headers
+Install the latest stable Rust toolchain, Cargo, a C toolchain, pkg-config, and libudev development headers
 (`libudev-dev` on Debian/Ubuntu).
 
 From the checked-out repository root:

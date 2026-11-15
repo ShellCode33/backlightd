@@ -25,8 +25,8 @@ sudo systemctl enable --now backlightd
 
 Linux with systemd and udev is required. External monitors need DDC/CI enabled
 and accessible `/dev/i2c-*` devices; the `i2c-dev` kernel module may be needed.
-To build from source, install Rust 1.86+, a C toolchain, `pkg-config`, and libudev
-headers, then run `make`, `sudo make install`, and `sudo make activate`.
+To build from source, install the latest stable Rust toolchain, a C toolchain,
+`pkg-config`, and libudev headers, then run `make`, `sudo make install`, and `sudo make activate`.
 
 ## Use
 

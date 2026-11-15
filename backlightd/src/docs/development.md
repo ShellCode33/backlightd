@@ -28,8 +28,9 @@ cargo test --workspace --doc --locked
 ```
 
 Add `--offline` when dependencies are cached. Linux builds need a C toolchain,
-pkg-config, and libudev development headers. The declared minimum Rust version is
-1.86. System integration uses Linux-specific APIs; docs.rs builds should target
+pkg-config, and libudev development headers. Use the latest stable Rust toolchain;
+older compiler versions are not supported. System integration uses Linux-specific
+APIs; docs.rs builds should target
 `x86_64-unknown-linux-gnu`.
 
 ## Regression strategy

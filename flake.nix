@@ -1,15 +1,28 @@
 {
   description = "Linux brightness daemon, CLI, and NixOS module";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-  outputs = { self, nixpkgs }:
+  inputs.rust-overlay = {
+    url = "github:oxalica/rust-overlay";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+  outputs = { self, nixpkgs, rust-overlay }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       eachSystem = nixpkgs.lib.genAttrs systems;
     in {
       packages = eachSystem (system:
-        let pkgs = import nixpkgs { inherit system; };
-        in { default = pkgs.callPackage ./nix/package.nix { }; });
-      nixosModules.default = import ./nix/module.nix;
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
+        in { default = pkgs.callPackage ./nix/package.nix { inherit rustPlatform; }; });
+      nixosModules.default = { lib, pkgs, ... }: {
+        imports = [ ./nix/module.nix ];
+        services.backlightd.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      };
       checks = eachSystem (system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -20,7 +33,6 @@
               system.stateVersion = "26.05";
               services.backlightd = {
                 enable = true;
-                inherit package;
                 settings.location.source = "none";
               };
             } ];

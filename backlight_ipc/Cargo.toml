@@ -2,7 +2,6 @@
 name = "backlight_ipc"
 version = "0.1.0"
 edition = "2021"
-rust-version.workspace = true
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

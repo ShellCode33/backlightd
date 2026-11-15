@@ -60,16 +60,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   tests:
-    name: Tests (Rust ${{ matrix.toolchain }})
+    name: Tests (Rust stable)
     env:
       # Avoid forked signal-test children briefly retaining another test's flock.
       RUST_TEST_THREADS: "1"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: ["1.86.0", stable]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -81,11 +77,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends libudev-dev pkg-config tzdata
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
       - name: Unit tests and documentation examples
         run: cargo test --workspace --locked
       - name: Schedule regressions across time zones
-        if: matrix.toolchain == 'stable'
         run: |
           for zone in America/New_York Europe/Berlin Pacific/Apia Pacific/Kiritimati; do
             echo "Testing schedules in $zone"
