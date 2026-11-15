@@ -27,10 +27,26 @@ impl Display for BacklightMode {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub requested_percent: Option<u8>,
+    pub brightness_percent: u8,
+    pub hardware_percent: u8,
+    pub hardware_raw: u16,
+    pub maximum_raw: u16,
+    pub readback_raw: Option<u16>,
+    pub actual_raw: Option<u16>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BacklightInfo {
     pub brightness_percent: u8,
     pub mode: BacklightMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,6 +61,7 @@ pub enum BacklightCommand {
     NotifyHotplug,
     SetMode(BacklightMode),
     GetInfo,
+    GetDeviceInfo(usize),
     GetInfoResponse(BacklightInfo),
     NotifyShutdown,
     ErrorResponse(String),
@@ -132,9 +149,14 @@ mod tests {
             ),
             (BacklightCommand::GetInfo, r#"{"type":"get_info"}"#),
             (
+                BacklightCommand::GetDeviceInfo(3),
+                r#"{"type":"get_device_info","value":3}"#,
+            ),
+            (
                 BacklightCommand::GetInfoResponse(BacklightInfo {
                     brightness_percent: 50,
                     mode: BacklightMode::Manual,
+                    device: None,
                 }),
                 r#"{"type":"get_info_response","value":{"brightness_percent":50,"mode":"manual"}}"#,
             ),

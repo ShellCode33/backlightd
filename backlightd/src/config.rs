@@ -14,10 +14,64 @@ static CURRENT: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
+    pub brightness: Calibration,
+    pub devices: Vec<Device>,
     pub automatic: Automatic,
     pub location: Location,
     pub manual: Manual,
     pub logging: Logging,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Calibration {
+    pub minimum_percent: u8,
+    pub maximum_percent: u8,
+    pub exponent: f64,
+}
+impl Default for Calibration {
+    fn default() -> Self {
+        Self {
+            minimum_percent: 0,
+            maximum_percent: 100,
+            exponent: 1.0,
+        }
+    }
+}
+impl Calibration {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.minimum_percent < self.maximum_percent && self.maximum_percent <= 100,
+            "Calibration requires 0 <= minimum_percent < maximum_percent <= 100"
+        );
+        anyhow::ensure!(
+            self.exponent.is_finite() && (0.1..=10.0).contains(&self.exponent),
+            "Calibration exponent must be finite and between 0.1 and 10"
+        );
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Device {
+    pub id: String,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    pub minimum_percent: Option<u8>,
+    pub maximum_percent: Option<u8>,
+    pub exponent: Option<f64>,
+}
+fn enabled_by_default() -> bool {
+    true
+}
+impl Device {
+    pub fn calibration(&self, base: &Calibration) -> Calibration {
+        Calibration {
+            minimum_percent: self.minimum_percent.unwrap_or(base.minimum_percent),
+            maximum_percent: self.maximum_percent.unwrap_or(base.maximum_percent),
+            exponent: self.exponent.unwrap_or(base.exponent),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -137,6 +191,18 @@ impl Config {
     }
     pub fn validate(&self) -> anyhow::Result<()> {
         use chrono::Timelike;
+        self.brightness.validate().context("brightness")?;
+        let mut ids = std::collections::HashSet::new();
+        for device in &self.devices {
+            anyhow::ensure!(
+                !device.id.is_empty() && ids.insert(&device.id),
+                "Device IDs must be nonempty and unique"
+            );
+            device
+                .calibration(&self.brightness)
+                .validate()
+                .with_context(|| format!("device {}", device.id))?;
+        }
         let auto = &self.automatic;
         anyhow::ensure!(
             auto.minimum_percent >= 1
@@ -225,6 +291,20 @@ pub(crate) fn publish(config: Arc<Config>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_invalid_calibration_and_duplicate_device_rules() {
+        for text in [
+            "[brightness]\nexponent = nan",
+            "[brightness]\nexponent = 0",
+            "[brightness]\nminimum_percent = 90\nmaximum_percent = 80",
+            "[[devices]]\nid = ''",
+            "[[devices]]\nid = 'a'\n[[devices]]\nid = 'a'",
+            "[[devices]]\nid = 'a'\nexponent = inf",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
     #[test]
     fn schedule_validation_and_safe_defaults() {
         let defaults = Config::default();

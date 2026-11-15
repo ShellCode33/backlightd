@@ -21,6 +21,9 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
 - `backlightd/src/shutdown.rs`: blocks SIGTERM/SIGINT before spawning workers
   and receives them through signalfd on the main thread. SIGHUP loads and validates
   configuration before queueing its application through the controller.
+- `backlightd/src/calibration.rs`: logical/hardware mapping, optional curves,
+  per-device overrides, and stable EDID fingerprints. Preserve requested logical
+  intent separately from hardware quantization.
 - `backlightd/src/config.rs`: strict TOML parsing, validation, immutable snapshots,
   and compatibility environment overrides. Default path: `/etc/backlightd/config.toml`.
 - `backlightd/src/controller.rs`: serializes commands, discovery, mode changes,
@@ -79,8 +82,17 @@ Identity must distinguish devices even when model names are identical. Failed
 inheritance remains pending for retry. Detected resume reconciles known devices
 too, since displays may reset brightness. Discovery must not extend the manual
 override; expired overrides and auto mode must not reapply an obsolete target.
-Status reports the integer average of stored device percentages, not a fresh
-hardware read. Avoid treating those values as authoritative forever.
+Status reports the integer average of representable logical device percentages,
+not a fresh hardware read. Relative adjustments use retained requested targets,
+so coarse hardware steps do not prevent small repeated adjustments. Discovery
+preserves this intent only if calibration and the observed raw value are unchanged;
+an external raw change resets it. Disabled devices remain discoverable/listed but
+are excluded from writes and averages. Detailed device data separates requested,
+representable, raw control readback, and optional ACPI actual readings. A write
+clears its readback evidence; do not label representable output as verified.
+`GetDeviceInfo(index)` returns one optional device in `GetInfoResponse.device`,
+allowing --devices to enumerate without exceeding the per-message limit. Normal
+status omits this field to preserve its existing JSON shape.
 
 Auto mode computes both the target and the next time it can change. Keep the
 configured solar ramps (four hours by default); missing solar events or overlapping transitions fall back

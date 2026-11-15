@@ -36,6 +36,8 @@ backlightctl -b +5%           # Increase brightness by 5 percentage points
 backlightctl -b -5%           # Decrease brightness by 5 percentage points
 backlightctl --auto           # Resume automatic brightness
 backlightctl --json           # Machine-readable brightness and mode
+backlightctl --devices        # Monitor IDs, targets, and hardware readings
+backlightctl --devices --json # Detailed device data for scripts
 backlightctl --refresh        # Rediscover monitors and wait for completion
 ```
 
@@ -67,3 +69,23 @@ Legacy `BACKLIGHTD_LOCATION`, `BACKLIGHTD_ENABLE_LOCATION_API`, and
 `BACKLIGHTD_LOG_LEVEL` environment settings remain supported as overrides.
 Manual coordinates take precedence over the IP lookup setting. No systemd
 override is needed for new installations.
+
+Use `[brightness]` for a global hardware range or optional curve, and `[[devices]]`
+to override it per monitor or exclude a monitor from control. Copy the exact IDs
+from `backlightctl --devices`. Defaults use a linear scale; equal percentages
+are not a promise of equal perceived brightness on different screens.
+
+Detailed device status separates the last requested logical percentage, the
+percentage representable by the hardware, raw control values, and readback.
+Readback fields are empty after an unverified write; no fresh hardware read is
+performed for status requests. Discovery updates readings. Linux's optional
+`actual_brightness` reading is reported separately when available. The regular
+status percentage averages representable logical brightness across enabled devices.
+A low-resolution panel may not support every percentage step. Manual relative
+steps retain their intended target so repeated small adjustments can progress.
+
+Reloading calibration in manual mode preserves the current hardware setting;
+the next brightness command uses the new mapping. Auto mode reapplies its target.
+Screens with identical EDIDs share configuration IDs; devices without EDID use
+an identifier that can depend on their bus. Calibration cannot infer physical
+luminance or room lighting without measurement.

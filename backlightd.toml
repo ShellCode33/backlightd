@@ -4,11 +4,33 @@
 # Reload: sudo systemctl kill --signal=HUP backlightd
 # A rejected reload leaves the running settings unchanged.
 
+[brightness]
+# Logical 0-100% is mapped into this hardware-control range, for both manual and auto.
+# Defaults are an unchanged linear scale. A nonzero minimum means logical 0% will
+# not black out the screen: use --turn-off for power control.
+minimum_percent = 0
+maximum_percent = 100
+# Optional percentage curve: raw_fraction = (logical_fraction ^ exponent).
+# 1.0 is linear; >1 gives finer low-end control. Valid range: 0.1 to 10.
+# This is a preference/calibration curve, not a universal model of human vision.
+exponent = 1.0
+
+# Per-device overrides are optional. Copy the exact ID from backlightctl --devices.
+# Unspecified values inherit [brightness]. Identical EDIDs share an ID/rule.
+# enabled = false excludes brightness/power writes and the group average;
+# discovery still reads the device. EDID IDs survive changes to I2C bus numbering.
+# [[devices]]
+# id = "ddc:edid:0123456789abcdef"
+# enabled = true
+# minimum_percent = 5
+# maximum_percent = 80
+# exponent = 2.0
+
 [automatic]
 # "solar" uses sunrise/sunset with a clock fallback; "clock" always uses local times.
 schedule = "solar"
 # Limits apply only to automatic targets. Manual commands can still request 0-100%.
-# These are device-control percentages, not calibrated luminance measurements.
+# These are logical percentages, transformed by [brightness] and device overrides.
 minimum_percent = 10
 maximum_percent = 100
 # Ramps must fit between the clock anchors. Solar overlaps use the clock schedule.

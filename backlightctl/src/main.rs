@@ -31,6 +31,10 @@ struct BacklightctlCli {
     #[clap(long, conflicts_with_all = ["brightness", "auto", "turn_off", "turn_on", "refresh", "json"])]
     notify_hotplug: bool,
 
+    /// List monitors, stable configuration IDs, and brightness details
+    #[clap(long, conflicts_with_all = ["brightness", "auto", "turn_off", "turn_on", "notify_hotplug"])]
+    devices: bool,
+
     /// UNIX socket path (for test purposes)
     #[clap(short, long, default_value = DEFAULT_UNIX_SOCKET_PATH)]
     unix_socket_path: PathBuf,
@@ -185,6 +189,65 @@ fn main() {
             eprintln!("{err}");
             exit(1);
         }
+    }
+
+    if cli.devices {
+        let mut reader = BufReader::new(&stream);
+        let mut devices = Vec::new();
+        for index in 0.. {
+            if let Err(err) = BacklightCommand::GetDeviceInfo(index).serialize_into(&stream) {
+                eprintln!("{err}");
+                exit(1);
+            }
+            match BacklightCommand::deserialize_from(&mut reader) {
+                Ok(BacklightCommand::GetInfoResponse(info)) => match info.device {
+                    Some(device) => devices.push(device),
+                    None => break,
+                },
+                Ok(BacklightCommand::ErrorResponse(err)) => {
+                    eprintln!("{err}");
+                    exit(1);
+                }
+                other => {
+                    eprintln!("Unexpected device response: {other:?}");
+                    exit(1);
+                }
+            }
+        }
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::to_string(&devices).expect("serializable device info")
+            );
+        } else {
+            for device in devices {
+                println!("{} ({})", device.id, device.name);
+                let requested = device
+                    .requested_percent
+                    .map(|p| format!("{p}%"))
+                    .unwrap_or_else(|| "not recorded".into());
+                let readback = device
+                    .readback_raw
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unverified".into());
+                let actual = device
+                    .actual_raw
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unavailable".into());
+                println!(
+                    "  Enabled: {}; brightness: {}%; requested: {}; hardware: {}/{} ({}%)",
+                    device.enabled,
+                    device.brightness_percent,
+                    requested,
+                    device.hardware_raw,
+                    device.maximum_raw,
+                    device.hardware_percent
+                );
+                println!("  Control readback: {readback}; actual backlight reading: {actual}");
+            }
+        }
+        let _ = BacklightCommand::NotifyShutdown.serialize_into(&stream);
+        return;
     }
 
     if cli.auto {

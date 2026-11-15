@@ -2,7 +2,7 @@ use std::{fs, io::Write, path::PathBuf};
 
 use anyhow::{bail, Context};
 
-use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice};
+use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice, RawBrightness};
 
 pub(crate) const ACPI_DEVICES_PATH: &str = "/sys/class/backlight";
 
@@ -11,10 +11,12 @@ pub(crate) struct BacklightAcpiDevice {
     max_brightness_raw: u16,
     current_brightness_raw: u16,
     current_brightness_percent: u8,
+    readback_raw: Option<u16>,
+    actual_raw: Option<u16>,
 }
 
 impl BacklightAcpiDevice {
-    fn set_power(&self, on: bool) -> anyhow::Result<()> {
+    fn set_power(&mut self, on: bool) -> anyhow::Result<()> {
         let path = self.path.join("bl_power");
         // Open without creating: a missing sysfs attribute is unsupported.
         // See https://docs.kernel.org/gpu/backlight.html (BACKLIGHT_POWER_*).
@@ -25,7 +27,9 @@ impl BacklightAcpiDevice {
                 format!("Unable to open backlight power control {}", path.display())
             })?;
         file.write_all(if on { b"0" } else { b"4" })
-            .with_context(|| format!("Unable to set backlight power through {}", path.display()))
+            .with_context(|| format!("Unable to set backlight power through {}", path.display()))?;
+        self.actual_raw = None;
+        Ok(())
     }
 
     pub(crate) fn new(path: PathBuf) -> anyhow::Result<Self> {
@@ -46,7 +50,13 @@ impl BacklightAcpiDevice {
             }
         };
 
+        let actual_raw = fs::read_to_string(path.join("actual_brightness"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|value| *value <= max_brightness_raw);
         Ok(Self {
+            readback_raw: Some(current_brightness_raw),
+            actual_raw,
             path,
             max_brightness_raw,
             current_brightness_raw,
@@ -61,15 +71,30 @@ impl BacklightDevice for BacklightAcpiDevice {
     }
 
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
+        self.set_raw_brightness(percent_to_raw(percent, self.max_brightness_raw)?)
+    }
+    fn raw_brightness(&self) -> RawBrightness {
+        RawBrightness {
+            value: self.current_brightness_raw,
+            maximum: self.max_brightness_raw,
+            readback: self.readback_raw,
+            actual: self.actual_raw,
+        }
+    }
+    fn set_raw_brightness(&mut self, new_brightness: u16) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            new_brightness <= self.max_brightness_raw,
+            "Brightness exceeds hardware maximum"
+        );
         let current_brightness_path = self.path.join("brightness");
-        let new_brightness = percent_to_raw(percent, self.max_brightness_raw)?;
-
         if let Err(err) = fs::write(&current_brightness_path, new_brightness.to_string()) {
             bail!("{}: {err}", current_brightness_path.display());
         }
 
         self.current_brightness_raw = new_brightness;
-        self.current_brightness_percent = percent;
+        self.current_brightness_percent = raw_to_percent(new_brightness, self.max_brightness_raw)?;
+        self.readback_raw = None;
+        self.actual_raw = None;
         Ok(())
     }
 

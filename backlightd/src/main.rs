@@ -20,6 +20,7 @@ use wake::Sender;
 
 mod acpi;
 mod auto;
+mod calibration;
 mod config;
 mod controller;
 mod ddc;
@@ -276,7 +277,10 @@ fn handle_client(
         if matches!(command, BacklightCommand::NotifyShutdown) {
             return Ok(());
         }
-        let get_info = matches!(command, BacklightCommand::GetInfo);
+        let get_info = matches!(
+            command,
+            BacklightCommand::GetInfo | BacklightCommand::GetDeviceInfo(_)
+        );
         let hotplug = matches!(command, BacklightCommand::NotifyHotplug);
         let (reply, response) = channel();
         sender
@@ -342,6 +346,12 @@ mod tests {
                     if stopping.load(Ordering::Acquire) {
                         return Ok(());
                     }
+                    if let Some(settings) = request.reload {
+                        let duration = settings.manual.override_duration.clone();
+                        config::publish(settings);
+                        std::fs::write(&active_path, duration)?;
+                        continue;
+                    }
                     if mode == "active" {
                         use std::io::Read;
                         std::fs::write(&active_path, "active")?;
@@ -350,8 +360,15 @@ mod tests {
                         std::fs::write(&complete_path, "complete")?;
                     }
                     let _ = request.reply.send(Ok(BacklightInfo {
-                        brightness_percent: 50,
+                        brightness_percent: if mode == "reload"
+                            && config::current().manual.override_duration == "forever"
+                        {
+                            77
+                        } else {
+                            50
+                        },
                         mode: BacklightMode::Manual,
+                        device: None,
                     }));
                 }
             },
@@ -416,6 +433,7 @@ mod tests {
                 libc::sigemptyset(&mut set);
                 libc::sigaddset(&mut set, libc::SIGTERM);
                 libc::sigaddset(&mut set, libc::SIGINT);
+                libc::sigaddset(&mut set, libc::SIGHUP);
                 if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -424,6 +442,59 @@ mod tests {
         }
         let child = command.spawn().unwrap();
         (ShutdownChild { child, directory }, socket)
+    }
+
+    #[test]
+    fn sighup_applies_valid_configuration_and_rejects_invalid_reload() {
+        let (mut server, path) = shutdown_child("reload");
+        wait_for(|| path.exists());
+        let config_path = path.with_extension("toml");
+        std::fs::write(&config_path, "[manual]\noverride_duration = 'forever'").unwrap();
+        // SAFETY: Both signals target only this isolated test process.
+        assert_eq!(
+            unsafe { libc::kill(server.child.id() as _, libc::SIGHUP) },
+            0
+        );
+        wait_for(|| {
+            std::fs::read_to_string(path.with_extension("active"))
+                .ok()
+                .as_deref()
+                == Some("forever")
+        });
+        for invalid in [false, true] {
+            if invalid {
+                std::fs::write(&config_path, "[logging]\nlevel = 'invalid'").unwrap();
+                // SAFETY: The child is still owned by this test.
+                assert_eq!(
+                    unsafe { libc::kill(server.child.id() as _, libc::SIGHUP) },
+                    0
+                );
+            }
+            let client = UnixStream::connect(&path).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            BacklightCommand::GetInfo.serialize_into(&client).unwrap();
+            let response = BacklightCommand::deserialize_from(BufReader::new(&client)).unwrap();
+            assert!(
+                matches!(response, BacklightCommand::GetInfoResponse(info) if info.brightness_percent == 77)
+            );
+            BacklightCommand::NotifyShutdown
+                .serialize_into(&client)
+                .unwrap();
+        }
+        // SAFETY: Shut down only the child process spawned above.
+        assert_eq!(
+            unsafe { libc::kill(server.child.id() as _, libc::SIGTERM) },
+            0
+        );
+        let mut status = None;
+        wait_for(|| {
+            status = server.child.try_wait().unwrap();
+            status.is_some()
+        });
+        assert!(status.unwrap().success());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -543,6 +614,7 @@ mod tests {
             .send(Ok(BacklightInfo {
                 brightness_percent: 50,
                 mode: BacklightMode::Auto,
+                device: None,
             }))
             .unwrap();
         assert!(matches!(
@@ -640,8 +712,9 @@ mod tests {
         let info = BacklightInfo {
             brightness_percent: 50,
             mode: BacklightMode::Auto,
+            device: None,
         };
-        request.reply.send(Ok(info)).unwrap();
+        request.reply.send(Ok(info.clone())).unwrap();
         let status = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(status.command, BacklightCommand::GetInfo));
         status.reply.send(Ok(info)).unwrap();

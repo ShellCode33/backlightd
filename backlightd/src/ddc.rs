@@ -5,7 +5,7 @@ use std::{error::Error, fmt::Display as ErrorDisplay, thread, time::Duration};
 use anyhow::bail;
 use ddc_hi::{Ddc, Display, FeatureCode};
 
-use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice};
+use crate::monitors::{percent_to_raw, raw_to_percent, BacklightDevice, RawBrightness};
 
 const VCP_FEATURE_BRIGHTNESS: FeatureCode = 0x10;
 const VCP_FEATURE_POWER: FeatureCode = 0xD6;
@@ -34,6 +34,8 @@ pub(crate) struct BacklightDdcDevice {
     max_brightness_raw: u16,
     current_brightness_raw: u16,
     current_brightness_percent: u8,
+    readback_raw: Option<u16>,
+    actual_raw: Option<u16>,
 }
 
 impl BacklightDdcDevice {
@@ -44,6 +46,8 @@ impl BacklightDdcDevice {
         )?;
 
         Ok(Self {
+            readback_raw: Some(brightness.value()),
+            actual_raw: None,
             display: ddc_device,
             max_brightness_raw: brightness.maximum(),
             current_brightness_raw: brightness.value(),
@@ -61,8 +65,31 @@ impl BacklightDevice for BacklightDdcDevice {
         )
     }
 
+    fn config_id(&self) -> String {
+        self.display
+            .info
+            .edid_data
+            .as_deref()
+            .filter(|edid| !edid.is_empty())
+            .map(crate::calibration::edid_id)
+            .unwrap_or_else(|| self.identity())
+    }
+    fn raw_brightness(&self) -> RawBrightness {
+        RawBrightness {
+            value: self.current_brightness_raw,
+            maximum: self.max_brightness_raw,
+            readback: self.readback_raw,
+            actual: self.actual_raw,
+        }
+    }
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()> {
-        let new_brightness = percent_to_raw(percent, self.max_brightness_raw)?;
+        self.set_raw_brightness(percent_to_raw(percent, self.max_brightness_raw)?)
+    }
+    fn set_raw_brightness(&mut self, new_brightness: u16) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            new_brightness <= self.max_brightness_raw,
+            "Brightness exceeds hardware maximum"
+        );
 
         if let Err(err) = self
             .display
@@ -73,7 +100,9 @@ impl BacklightDevice for BacklightDdcDevice {
         }
 
         self.current_brightness_raw = new_brightness;
-        self.current_brightness_percent = percent;
+        self.current_brightness_percent = raw_to_percent(new_brightness, self.max_brightness_raw)?;
+        self.readback_raw = None;
+        self.actual_raw = None;
         Ok(())
     }
 

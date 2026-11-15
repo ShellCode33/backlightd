@@ -21,11 +21,65 @@ static MONITORS: Mutex<MonitorState> = Mutex::new(MonitorState {
 
 pub(crate) trait BacklightDevice {
     fn identity(&self) -> String;
+    fn config_id(&self) -> String {
+        self.identity()
+    }
+    fn enabled(&self) -> bool {
+        true
+    }
+    fn reported_brightness(&self) -> u8 {
+        self.get_brightness()
+    }
+    fn requested_percent(&self) -> Option<u8> {
+        None
+    }
+    fn restore_requested(&mut self, _percent: u8) {}
+    fn calibration(&self) -> Option<crate::config::Calibration> {
+        None
+    }
+    fn raw_brightness(&self) -> RawBrightness {
+        RawBrightness {
+            value: u16::from(self.get_brightness()),
+            maximum: 100,
+            readback: None,
+            actual: None,
+        }
+    }
+    fn set_raw_brightness(&mut self, raw: u16) -> anyhow::Result<()> {
+        self.set_brightness(raw_to_percent(raw, self.raw_brightness().maximum)?)
+    }
     fn name(&self) -> String;
     fn set_brightness(&mut self, percent: u8) -> anyhow::Result<()>;
     fn get_brightness(&self) -> u8;
     fn turn_off(&mut self) -> anyhow::Result<()>;
     fn turn_on(&mut self) -> anyhow::Result<()>;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RawBrightness {
+    pub value: u16,
+    pub maximum: u16,
+    pub readback: Option<u16>,
+    pub actual: Option<u16>,
+}
+
+pub(crate) fn device_info(index: usize) -> Option<backlight_ipc::DeviceInfo> {
+    let state = MONITORS.lock().unwrap();
+    state.devices.get(index).map(|device| {
+        let raw = device.raw_brightness();
+        backlight_ipc::DeviceInfo {
+            id: device.config_id(),
+            name: device.name(),
+            enabled: device.enabled(),
+            requested_percent: device.requested_percent(),
+            brightness_percent: device.reported_brightness(),
+            hardware_percent: raw_to_percent(raw.value, raw.maximum).unwrap_or(0),
+            hardware_raw: raw.value,
+            maximum_raw: raw.maximum,
+            readback_raw: raw.readback,
+            actual_raw: raw.actual,
+        }
+    })
 }
 
 pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
@@ -102,7 +156,12 @@ pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
         acpi_started.elapsed().as_millis()
     );
     let mut monitors = MONITORS.lock().expect("Unable to acquire MONITORS mutex");
-    failures += replace_devices(&mut monitors, new_monitors, reason);
+    let config = crate::config::current();
+    let configured = new_monitors
+        .into_iter()
+        .map(|device| crate::calibration::configure(device, &config))
+        .collect();
+    failures += replace_devices(&mut monitors, configured, reason);
     log::debug!(
         "Discovery finished: reason={reason} monitors={} failed={failures} elapsed_ms={}",
         monitors.devices.len(),
@@ -136,6 +195,22 @@ fn replace_devices(
     let mut pending = Vec::new();
     for device in &mut discovered {
         let id = device.identity();
+        if !device.enabled() {
+            continue;
+        }
+        if let Some(previous) = state
+            .devices
+            .iter()
+            .find(|previous| previous.identity() == id)
+        {
+            if previous.raw_brightness().value == device.raw_brightness().value
+                && previous.calibration() == device.calibration()
+            {
+                if let Some(requested) = previous.requested_percent() {
+                    device.restore_requested(requested);
+                }
+            }
+        }
         // Retry the original absolute target, never apply a relative step twice.
         let target = state
             .pending_inheritance
@@ -195,6 +270,9 @@ fn write_brightness(
     let mut failure = None;
     let mut failed_targets = Vec::new();
     for monitor in &mut state.devices {
+        if !monitor.enabled() {
+            continue;
+        }
         let percent = target(monitor.get_brightness());
         let id = monitor.identity();
         state
@@ -289,6 +367,9 @@ fn write_power(
     let mut ids = Vec::new();
     let mut error = None;
     for monitor in &mut state.devices {
+        if !monitor.enabled() {
+            continue;
+        }
         let id = monitor.identity();
         if only.is_some_and(|ids| !ids.contains(&id)) {
             continue;
@@ -367,21 +448,32 @@ pub(crate) fn turn_on() -> anyhow::Result<()> {
     change_power(true)
 }
 
+fn average(state: &MonitorState, reported: bool) -> u8 {
+    let mut count = 0;
+    let sum: usize = state
+        .devices
+        .iter()
+        .filter(|device| device.enabled())
+        .map(|device| {
+            count += 1;
+            usize::from(if reported {
+                device.reported_brightness()
+            } else {
+                device.get_brightness()
+            })
+        })
+        .sum();
+    if count == 0 {
+        0
+    } else {
+        (sum / count) as u8
+    }
+}
 pub(crate) fn get_average_brightness() -> u8 {
-    let state = MONITORS.lock().unwrap();
-    let monitors = &state.devices;
-
-    if monitors.is_empty() {
-        return 0;
-    }
-
-    let mut sum: usize = 0;
-
-    for monitor in monitors {
-        sum += monitor.get_brightness() as usize;
-    }
-
-    (sum / monitors.len()) as u8
+    average(&MONITORS.lock().unwrap(), true)
+}
+pub(crate) fn get_average_target() -> u8 {
+    average(&MONITORS.lock().unwrap(), false)
 }
 
 #[cfg(test)]
@@ -436,6 +528,57 @@ mod tests {
             fail,
             power_calls: None,
         })
+    }
+
+    #[test]
+    fn discovery_preserves_intent_only_when_hardware_and_calibration_are_unchanged() {
+        let config = crate::config::Config::parse("[brightness]\nexponent = 2").unwrap();
+        let mut original = crate::calibration::configure(device("a", 100, false), &config);
+        original.set_brightness(5).unwrap();
+        assert_eq!(original.raw_brightness().value, 1);
+        let mut state = MonitorState {
+            devices: vec![original],
+            manual_target: Some(5),
+            pending_inheritance: vec![],
+        };
+        replace_devices(
+            &mut state,
+            vec![crate::calibration::configure(
+                device("a", 1, false),
+                &config,
+            )],
+            "test",
+        );
+        assert_eq!(state.devices[0].get_brightness(), 5);
+        assert_eq!(state.devices[0].reported_brightness(), 10);
+        replace_devices(
+            &mut state,
+            vec![crate::calibration::configure(
+                device("a", 4, false),
+                &config,
+            )],
+            "test",
+        );
+        assert_eq!(state.devices[0].get_brightness(), 20);
+        assert_eq!(state.devices[0].requested_percent(), None);
+    }
+
+    #[test]
+    fn excluded_devices_are_not_written_or_averaged() {
+        let config =
+            crate::config::Config::parse("[[devices]]\nid = 'a'\nenabled = false").unwrap();
+        let mut state = MonitorState {
+            devices: vec![
+                crate::calibration::configure(device("a", 40, true), &config),
+                device("b", 60, false),
+            ],
+            manual_target: None,
+            pending_inheritance: vec![],
+        };
+        assert!(write_brightness(&mut state, |_| 80).is_ok());
+        assert_eq!(state.devices[0].get_brightness(), 40);
+        assert_eq!(average(&state, true), 80);
+        assert!(write_power(&mut state, false, None).is_ok());
     }
 
     #[test]

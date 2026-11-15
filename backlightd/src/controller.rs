@@ -24,11 +24,23 @@ trait Devices {
     fn refresh(&mut self, reason: &str) -> anyhow::Result<()>;
     fn set_manual_target(&mut self, target: Option<u8>);
     fn brightness(&self) -> u8;
+    fn target_brightness(&self) -> u8 {
+        self.brightness()
+    }
+    fn device_info(&self, _index: usize) -> Option<backlight_ipc::DeviceInfo> {
+        None
+    }
     fn automatic(&mut self) -> anyhow::Result<(u8, Duration)>;
 }
 
 struct Monitors;
 impl Devices for Monitors {
+    fn target_brightness(&self) -> u8 {
+        monitors::get_average_target()
+    }
+    fn device_info(&self, index: usize) -> Option<backlight_ipc::DeviceInfo> {
+        monitors::device_info(index)
+    }
     fn configure(&mut self, config: std::sync::Arc<crate::config::Config>) {
         crate::config::publish(config);
     }
@@ -111,6 +123,7 @@ impl<D: Devices> Controller<D> {
     fn reload(&mut self, config: std::sync::Arc<crate::config::Config>) {
         self.config = config.clone();
         self.devices.configure(config);
+        self.refresh_deadline = Instant::now();
         if self.mode == BacklightMode::Manual {
             self.update_manual_deadline();
         } else {
@@ -243,6 +256,11 @@ impl<D: Devices> Controller<D> {
             self.notify_hotplug(received_at, Instant::now());
         }
         self.service_deadlines();
+        let device_index = if let BacklightCommand::GetDeviceInfo(index) = &command {
+            Some(*index)
+        } else {
+            None
+        };
         match command {
             BacklightCommand::SetBrightness(p)
             | BacklightCommand::IncreaseBrightness(p)
@@ -253,10 +271,10 @@ impl<D: Devices> Controller<D> {
                 let target = match &command {
                     BacklightCommand::SetBrightness(p) => *p,
                     BacklightCommand::IncreaseBrightness(p) => {
-                        self.devices.brightness().saturating_add(*p).min(100)
+                        self.devices.target_brightness().saturating_add(*p).min(100)
                     }
                     BacklightCommand::DecreaseBrightness(p) => {
-                        self.devices.brightness().saturating_sub(*p).max(1)
+                        self.devices.target_brightness().saturating_sub(*p).max(1)
                     }
                     _ => unreachable!(),
                 };
@@ -277,7 +295,9 @@ impl<D: Devices> Controller<D> {
                     self.begin_manual();
                 }
             }
-            BacklightCommand::GetInfo | BacklightCommand::NotifyHotplug => {}
+            BacklightCommand::GetInfo
+            | BacklightCommand::GetDeviceInfo(_)
+            | BacklightCommand::NotifyHotplug => {}
             BacklightCommand::Refresh => {
                 // Only skip requests received before the last scan started.
                 // An event during that scan still requires one follow-up scan.
@@ -298,7 +318,9 @@ impl<D: Devices> Controller<D> {
             }
             _ => bail!("Unexpected response or shutdown command"),
         }
+        let device = device_index.and_then(|index| self.devices.device_info(index));
         Ok(BacklightInfo {
+            device,
             brightness_percent: self.devices.brightness(),
             mode: self.mode,
         })
