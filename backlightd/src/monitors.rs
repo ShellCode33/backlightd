@@ -468,11 +468,7 @@ fn average(state: &MonitorState, reported: bool) -> u8 {
             })
         })
         .sum();
-    if count == 0 {
-        0
-    } else {
-        (sum / count) as u8
-    }
+    sum.checked_div(count).unwrap_or(0) as u8
 }
 pub(crate) fn get_average_brightness() -> u8 {
     average(&MONITORS.lock().unwrap(), true)
