@@ -453,7 +453,7 @@ pub(crate) fn turn_on() -> anyhow::Result<()> {
     change_power(true)
 }
 
-fn average(state: &MonitorState, reported: bool) -> u8 {
+fn average(state: &MonitorState) -> u8 {
     let mut count = 0;
     let sum: usize = state
         .devices
@@ -461,20 +461,13 @@ fn average(state: &MonitorState, reported: bool) -> u8 {
         .filter(|device| device.enabled())
         .map(|device| {
             count += 1;
-            usize::from(if reported {
-                device.reported_brightness()
-            } else {
-                device.get_brightness()
-            })
+            usize::from(device.get_brightness())
         })
         .sum();
     sum.checked_div(count).unwrap_or(0) as u8
 }
 pub(crate) fn get_average_brightness() -> u8 {
-    average(&MONITORS.lock().unwrap(), true)
-}
-pub(crate) fn get_average_target() -> u8 {
-    average(&MONITORS.lock().unwrap(), false)
+    average(&MONITORS.lock().unwrap())
 }
 
 #[cfg(test)]
@@ -551,6 +544,7 @@ mod tests {
             "test",
         );
         assert_eq!(state.devices[0].get_brightness(), 5);
+        assert_eq!(average(&state), 5);
         assert_eq!(state.devices[0].reported_brightness(), 10);
         replace_devices(
             &mut state,
@@ -561,7 +555,29 @@ mod tests {
             "test",
         );
         assert_eq!(state.devices[0].get_brightness(), 20);
+        assert_eq!(average(&state), 20);
         assert_eq!(state.devices[0].requested_percent(), None);
+    }
+
+    #[test]
+    fn status_averages_logical_targets_even_when_hardware_steps_match() {
+        let mut state = MonitorState {
+            devices: vec![],
+            manual_target: None,
+            pending_inheritance: vec![],
+        };
+        assert_eq!(average(&state), 0);
+        for (id, target) in [("a", 1), ("b", 5)] {
+            let mut monitor = crate::calibration::configure(
+                device(id, 100, false),
+                &crate::config::Config::default(),
+            );
+            monitor.set_brightness(target).unwrap();
+            assert_eq!(monitor.raw_brightness().value, 1);
+            assert_eq!(monitor.reported_brightness(), 10);
+            state.devices.push(monitor);
+        }
+        assert_eq!(average(&state), 3);
     }
 
     #[test]
@@ -577,8 +593,8 @@ mod tests {
             pending_inheritance: vec![],
         };
         assert!(write_brightness(&mut state, |_| 80).is_ok());
-        assert_eq!(state.devices[0].get_brightness(), 40);
-        assert_eq!(average(&state, true), 80);
+        assert_eq!(state.devices[0].raw_brightness().value, 40);
+        assert_eq!(average(&state), 80);
         assert!(write_power(&mut state, false, None).is_ok());
     }
 

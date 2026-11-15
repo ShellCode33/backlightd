@@ -34,7 +34,7 @@ impl Default for Calibration {
         Self {
             minimum_percent: 0,
             maximum_percent: 100,
-            exponent: 1.0,
+            exponent: 2.0,
         }
     }
 }
@@ -94,7 +94,7 @@ impl Default for Automatic {
     fn default() -> Self {
         Self {
             schedule: Schedule::Solar,
-            minimum_percent: 10,
+            minimum_percent: 5,
             maximum_percent: 100,
             transition_duration: "4h".into(),
             morning: "06:00".into(),
@@ -309,7 +309,9 @@ mod tests {
     fn schedule_validation_and_safe_defaults() {
         let defaults = Config::default();
         assert_eq!(defaults.location.source, LocationSource::None);
-        assert_eq!(defaults.automatic.minimum_percent, 10);
+        assert_eq!(defaults.automatic.minimum_percent, 5);
+        assert_eq!(defaults.brightness.minimum_percent, 0);
+        assert_eq!(defaults.brightness.exponent, 2.0);
         assert!(Config::parse("[automatic]\nmorning = '22:00'\nevening = '10:00'").is_ok());
         for text in [
             "[automatic]\nminimum_percent = 0",
@@ -320,7 +322,12 @@ mod tests {
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
-        Config::parse(include_str!("../../etc/backlightd/config.toml")).unwrap();
+        let example = Config::parse(include_str!("../../etc/backlightd/config.toml")).unwrap();
+        assert_eq!(
+            example.automatic.minimum_percent,
+            defaults.automatic.minimum_percent
+        );
+        assert_eq!(example.brightness.exponent, defaults.brightness.exponent);
     }
 
     #[test]

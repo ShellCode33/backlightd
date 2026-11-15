@@ -40,9 +40,6 @@ trait Devices {
 
 struct Monitors;
 impl Devices for Monitors {
-    fn target_brightness(&self) -> u8 {
-        monitors::get_average_target()
-    }
     fn device_info(&self, index: usize) -> Option<backlight_ipc::DeviceInfo> {
         monitors::device_info(index)
     }

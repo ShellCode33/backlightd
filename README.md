@@ -31,6 +31,16 @@ including time suspended. See the [CLI reference](https://github.com/ShellCode33
 for all commands and [integrations](https://github.com/ShellCode33/backlightd/wiki/Integrations)
 for shortcuts and Waybar setup.
 
+## Brightness that feels natural
+
+Human light perception is nonlinear. By default, backlightd maps your logical
+percentage through a power curve (exponent 2.0), giving finer control at the dim
+end. Status bars show your logical target; the daemon handles hardware mapping
+and rounding underneath. Some adjacent percentages may use the same hardware
+step, and equal percentages need not look equally bright on different monitors.
+The curve is configurable globally or per monitor; use exponent 1.0 for linear
+control. See [brightness and calibration](https://github.com/ShellCode33/backlightd/wiki/Brightness-and-calibration).
+
 ## Configure
 
 Settings live in `/etc/backlightd/config.toml`, with comments explaining each

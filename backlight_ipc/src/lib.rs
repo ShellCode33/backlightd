@@ -126,7 +126,9 @@ pub struct DeviceInfo {
 /// Normal status omits `device` from JSON. Device enumeration ends when the
 /// requested index has no record and this field is None.
 pub struct BacklightInfo {
-    /// Integer average of representable logical percentages across enabled devices.
+    /// Integer average of logical targets across enabled devices.
+    /// Uses the inverse-mapped hardware value when no requested target is retained.
+    /// This is cached control intent, not a physical brightness measurement.
     pub brightness_percent: u8,
     /// Current controller mode.
     pub mode: BacklightMode,

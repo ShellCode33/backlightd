@@ -86,8 +86,9 @@ Identity must distinguish devices even when model names are identical. Failed
 inheritance remains pending for retry. Detected resume reconciles known devices
 too, since displays may reset brightness. Discovery must not extend the manual
 override; expired overrides and auto mode must not reapply an obsolete target.
-Status reports the integer average of representable logical device percentages,
-not a fresh hardware read. Relative adjustments use retained requested targets,
+Status reports the integer average of logical device targets, falling back to
+inverse-mapped hardware values when no target is retained, not a fresh hardware
+read. Device details still report representable percentages independently. Relative adjustments use retained requested targets,
 so coarse hardware steps do not prevent small repeated adjustments. Discovery
 preserves this intent only if calibration and the observed raw value are unchanged;
 an external raw change resets it. Disabled devices remain discoverable/listed but

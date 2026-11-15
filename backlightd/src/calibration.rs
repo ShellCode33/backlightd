@@ -172,14 +172,14 @@ mod tests {
         let mut device = configure(inner, &Config::default());
         device.set_brightness(1).unwrap();
         assert_eq!(device.requested_percent(), Some(1));
-        assert_eq!(device.reported_brightness(), 33);
+        assert_eq!(device.reported_brightness(), 58);
         assert_eq!(device.raw_brightness().readback, None);
-        for _ in 0..10 {
+        for _ in 0..14 {
             device.set_brightness(device.get_brightness() + 5).unwrap();
         }
-        assert_eq!(device.requested_percent(), Some(51));
+        assert_eq!(device.requested_percent(), Some(71));
         assert_eq!(device.raw_brightness().value, 2);
-        assert_eq!(device.reported_brightness(), 67);
+        assert_eq!(device.reported_brightness(), 82);
     }
     #[test]
     fn device_overrides_inherit_global_values() {

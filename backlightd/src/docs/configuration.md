@@ -29,7 +29,7 @@ logging through the logger's filter syntax. New configuration belongs in TOML.
 
 ## Schedule calculation
 
-Defaults are logical 10–100%, four-hour ramps, and fallback anchors 06:00/18:00
+Defaults are logical 5–100%, four-hour ramps, and fallback anchors 06:00/18:00
 in the machine's local time zone. IP lookup is opt-in, so a fresh installation
 without coordinates follows the clock schedule even if `schedule="solar"`.
 
