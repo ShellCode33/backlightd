@@ -20,6 +20,7 @@ use wake::Sender;
 
 mod acpi;
 mod auto;
+mod config;
 mod controller;
 mod ddc;
 mod location;
@@ -29,36 +30,57 @@ mod socket;
 mod wake;
 
 fn main() {
-    pretty_env_logger::formatted_builder()
-        .filter_level(log::LevelFilter::Info)
-        .parse_env("BACKLIGHTD_LOG_LEVEL")
-        .filter_module("ureq", log::LevelFilter::Warn)
-        .init();
-
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() != 1 && args.len() != 3 {
-        eprintln!(
-            "Usage: {} (optional: --unix-socket-path {DEFAULT_UNIX_SOCKET_PATH})",
-            args[0]
-        );
-        exit(1);
-    }
-
-    let unix_socket_path = if args.len() == 3 {
-        args[2].as_str()
-    } else {
-        DEFAULT_UNIX_SOCKET_PATH
-    };
-
-    if let Err(err) = run_server(std::path::Path::new(unix_socket_path), run_controller) {
-        log::error!("Daemon failed: {err:#}");
+    let result = (|| -> anyhow::Result<()> {
+        let mut socket_path = std::path::PathBuf::from(DEFAULT_UNIX_SOCKET_PATH);
+        let mut config_path = std::path::PathBuf::from(config::DEFAULT_PATH);
+        let mut required = false;
+        let mut check = false;
+        let mut args = env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--config" => {
+                    config_path = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--config requires a path"))?
+                        .into();
+                    required = true;
+                }
+                "--unix-socket-path" => {
+                    socket_path = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--unix-socket-path requires a path"))?
+                        .into()
+                }
+                "--check-config" => check = true,
+                "--help" | "-h" => {
+                    println!("Usage: backlightd [--config PATH] [--check-config] [--unix-socket-path PATH]");
+                    return Ok(());
+                }
+                _ => return Err(anyhow!("Unknown argument {arg:?}")),
+            }
+        }
+        let settings = config::load(&config_path, required || check)?;
+        if check {
+            println!("Configuration valid: {}", config_path.display());
+            return Ok(());
+        }
+        pretty_env_logger::formatted_builder()
+            .filter_level(log::LevelFilter::Trace)
+            .parse_env("BACKLIGHTD_LOG_LEVEL")
+            .filter_module("ureq", log::LevelFilter::Warn)
+            .init();
+        config::publish(settings);
+        run_server(&socket_path, &config_path, run_controller)
+    })();
+    if let Err(err) = result {
+        eprintln!("backlightd: {err:#}");
         exit(1);
     }
 }
 
 fn run_server(
     path: &std::path::Path,
+    config_path: &std::path::Path,
     controller: impl FnOnce(wake::Receiver<Request>, Arc<AtomicBool>) -> anyhow::Result<()>
         + Send
         + 'static,
@@ -78,13 +100,21 @@ fn run_server(
             controller(receiver, controller_stopping)
         })?;
     let mut workers = Vec::new();
-    let result = serve(&listener, &signals, &finished, &sender, &mut workers);
+    let result = serve(
+        &listener,
+        &signals,
+        &finished,
+        &sender,
+        &mut workers,
+        config_path,
+    );
     stopping.store(true, Ordering::Release);
     // Wake a controller blocked on its deadline. This command is internal only;
     // the client handler still interprets NotifyShutdown as closing a connection.
     let (reply, _) = channel();
     let _ = sender.send(Request {
         command: BacklightCommand::NotifyShutdown,
+        reload: None,
         received_at: boot_time::Instant::now(),
         reply,
     });
@@ -111,6 +141,7 @@ fn serve(
     finished: &UnixStream,
     sender: &Sender<Request>,
     workers: &mut Vec<ClientWorker>,
+    config_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     loop {
         let mut fds = [
@@ -132,7 +163,25 @@ fn serve(
             return Err(err.into());
         }
         if fds[1].revents & libc::POLLIN != 0 {
-            signals.receive()?;
+            let signal = signals.receive()?;
+            if signal == libc::SIGHUP as u32 {
+                match config::load(config_path, true) {
+                    Ok(config) => {
+                        let (reply, _) = channel();
+                        sender.send(Request {
+                            command: BacklightCommand::GetInfo,
+                            reload: Some(config),
+                            received_at: boot_time::Instant::now(),
+                            reply,
+                        })?;
+                    }
+                    Err(err) => log::error!(
+                        "Configuration reload rejected; retaining current settings: {err:#}"
+                    ),
+                }
+                continue;
+            }
+            log::info!("Received signal {signal}; shutting down");
             return Ok(());
         }
         if fds[2].revents != 0 {
@@ -233,6 +282,7 @@ fn handle_client(
         sender
             .send(Request {
                 command,
+                reload: None,
                 received_at: boot_time::Instant::now(),
                 reply,
             })
@@ -276,32 +326,36 @@ mod tests {
         let active_path = path.with_extension("active");
         let complete_path = path.with_extension("complete");
         let mode = env::var("BACKLIGHTD_SHUTDOWN_MODE").unwrap();
-        let result = run_server(&path, move |receiver, stopping| {
-            if mode == "error" {
-                return Err(anyhow!("fake controller failure"));
-            }
-            if mode == "panic" {
-                panic!("fake controller panic");
-            }
-            let gate = std::os::unix::net::UnixListener::bind(gate_path)?;
-            loop {
-                let request = receiver.recv_timeout(Duration::from_secs(10))?;
-                if stopping.load(Ordering::Acquire) {
-                    return Ok(());
+        let result = run_server(
+            &path,
+            &path.with_extension("toml"),
+            move |receiver, stopping| {
+                if mode == "error" {
+                    return Err(anyhow!("fake controller failure"));
                 }
-                if mode == "active" {
-                    use std::io::Read;
-                    std::fs::write(&active_path, "active")?;
-                    let (mut release, _) = gate.accept()?;
-                    release.read_exact(&mut [0])?;
-                    std::fs::write(&complete_path, "complete")?;
+                if mode == "panic" {
+                    panic!("fake controller panic");
                 }
-                let _ = request.reply.send(Ok(BacklightInfo {
-                    brightness_percent: 50,
-                    mode: BacklightMode::Manual,
-                }));
-            }
-        });
+                let gate = std::os::unix::net::UnixListener::bind(gate_path)?;
+                loop {
+                    let request = receiver.recv_timeout(Duration::from_secs(10))?;
+                    if stopping.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    if mode == "active" {
+                        use std::io::Read;
+                        std::fs::write(&active_path, "active")?;
+                        let (mut release, _) = gate.accept()?;
+                        release.read_exact(&mut [0])?;
+                        std::fs::write(&complete_path, "complete")?;
+                    }
+                    let _ = request.reply.send(Ok(BacklightInfo {
+                        brightness_percent: 50,
+                        mode: BacklightMode::Manual,
+                    }));
+                }
+            },
+        );
         if env::var("BACKLIGHTD_SHUTDOWN_MODE").unwrap() == "error" {
             assert!(format!("{:#}", result.unwrap_err()).contains("fake controller failure"));
         } else if env::var("BACKLIGHTD_SHUTDOWN_MODE").unwrap() == "panic" {

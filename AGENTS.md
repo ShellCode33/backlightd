@@ -19,7 +19,10 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
 - `backlightd/src/main.rs`: event-driven listener, bounded client workers,
   request/reply routing, controller supervision, and coordinated shutdown.
 - `backlightd/src/shutdown.rs`: blocks SIGTERM/SIGINT before spawning workers
-  and receives them through signalfd on the main thread.
+  and receives them through signalfd on the main thread. SIGHUP loads and validates
+  configuration before queueing its application through the controller.
+- `backlightd/src/config.rs`: strict TOML parsing, validation, immutable snapshots,
+  and compatibility environment overrides. Default path: `/etc/backlightd/config.toml`.
 - `backlightd/src/controller.rs`: serializes commands, discovery, mode changes,
   brightness targets, deadlines, and hotplug debouncing.
 - `backlightd/src/monitors.rs`: active devices, stable identities, manual-target
@@ -64,7 +67,8 @@ adjusts the valid devices.
 
 ### Brightness and modes
 
-Manual brightness commands establish a target and a 12-hour override. Record
+Manual brightness commands establish a target and a configurable override
+(default 12 hours, or `"forever"`). Reload preserves the original adjustment time. Record
 intent before device I/O so partial failures do not lose the requested target.
 Relative adjustments operate on each device's current stored percentage; values
 saturate at 100%, and relative decreases stop at 1%. Explicit 0% is allowed.

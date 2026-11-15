@@ -20,6 +20,7 @@ impl Signals {
             libc::sigemptyset(&mut signals);
             libc::sigaddset(&mut signals, libc::SIGTERM);
             libc::sigaddset(&mut signals, libc::SIGINT);
+            libc::sigaddset(&mut signals, libc::SIGHUP);
             let error = libc::pthread_sigmask(libc::SIG_BLOCK, &signals, &mut previous);
             if error != 0 {
                 return Err(io::Error::from_raw_os_error(error));
@@ -38,7 +39,7 @@ impl Signals {
         }
     }
 
-    pub(crate) fn receive(&self) -> io::Result<()> {
+    pub(crate) fn receive(&self) -> io::Result<u32> {
         // SAFETY: info is writable, correctly sized, and not inspected unless initialized.
         let mut info: libc::signalfd_siginfo = unsafe { mem::zeroed() };
         let result = unsafe {
@@ -54,8 +55,7 @@ impl Signals {
         if result as usize != mem::size_of_val(&info) {
             return Err(io::Error::other("Incomplete signal notification"));
         }
-        log::info!("Received signal {}; shutting down", info.ssi_signo);
-        Ok(())
+        Ok(info.ssi_signo)
     }
 }
 

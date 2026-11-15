@@ -1,0 +1,22 @@
+# backlightd configuration: /etc/backlightd/config.toml
+# Omitted keys use built-in defaults. Unknown keys are errors.
+# Validate: backlightd --check-config
+# Reload: sudo systemctl kill --signal=HUP backlightd
+# A rejected reload leaves the running settings unchanged.
+
+[location]
+# "none" uses the local clock schedule; "manual" uses coordinates;
+# "ip" contacts ip-api.com over HTTP and caches its estimate.
+source = "ip"
+# Set both coordinates when source = "manual". North/east are positive.
+# latitude = 48.8566
+# longitude = 2.3522
+
+[manual]
+# Override duration, including time asleep: s, m, h, d, or "forever".
+# Changing this on reload counts from the original manual adjustment.
+override_duration = "12h"
+
+[logging]
+# off, error, warn, info, debug, trace.
+level = "info"

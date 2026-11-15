@@ -6,7 +6,6 @@ use boot_time::Instant;
 
 use crate::{auto, monitors, wake::Receiver};
 
-const MANUAL_DURATION: Duration = Duration::from_secs(12 * 60 * 60);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const HOTPLUG_SETTLE: Duration = Duration::from_millis(250);
 const HOTPLUG_MAX_DELAY: Duration = Duration::from_secs(1);
@@ -14,11 +13,13 @@ const RETRY_DELAY: Duration = Duration::from_secs(60);
 
 pub(crate) struct Request {
     pub command: BacklightCommand,
+    pub reload: Option<std::sync::Arc<crate::config::Config>>,
     pub received_at: Instant,
     pub reply: Sender<anyhow::Result<BacklightInfo>>,
 }
 
 trait Devices {
+    fn configure(&mut self, _config: std::sync::Arc<crate::config::Config>) {}
     fn execute(&mut self, command: BacklightCommand) -> anyhow::Result<()>;
     fn refresh(&mut self, reason: &str) -> anyhow::Result<()>;
     fn set_manual_target(&mut self, target: Option<u8>);
@@ -28,6 +29,9 @@ trait Devices {
 
 struct Monitors;
 impl Devices for Monitors {
+    fn configure(&mut self, config: std::sync::Arc<crate::config::Config>) {
+        crate::config::publish(config);
+    }
     fn execute(&mut self, command: BacklightCommand) -> anyhow::Result<()> {
         match command {
             BacklightCommand::SetBrightness(p) => monitors::set_brightness_percent(p),
@@ -67,6 +71,9 @@ struct Controller<D> {
     last_refresh_error: Option<String>,
     last_awake_sample: std::time::Instant,
     last_boot_sample: Instant,
+    config: std::sync::Arc<crate::config::Config>,
+    manual_started: Option<Instant>,
+    manual_forever: bool,
 }
 
 impl<D: Devices> Controller<D> {
@@ -83,7 +90,34 @@ impl<D: Devices> Controller<D> {
             last_refresh_error: None,
             last_awake_sample,
             last_boot_sample,
+            config: crate::config::current(),
+            manual_started: None,
+            manual_forever: false,
         }
+    }
+
+    fn begin_manual(&mut self) {
+        self.manual_started = Some(Instant::now());
+        self.update_manual_deadline();
+    }
+    fn update_manual_deadline(&mut self) {
+        self.manual_forever = self.config.manual_duration().is_none();
+        if let (Some(started), Some(duration)) =
+            (self.manual_started, self.config.manual_duration())
+        {
+            self.deadline = started + duration;
+        }
+    }
+    fn reload(&mut self, config: std::sync::Arc<crate::config::Config>) {
+        self.config = config.clone();
+        self.devices.configure(config);
+        if self.mode == BacklightMode::Manual {
+            self.update_manual_deadline();
+        } else {
+            self.deadline = Instant::now();
+        }
+        self.service_deadlines();
+        log::info!("Configuration reloaded");
     }
 
     fn adjust(&mut self) -> anyhow::Result<()> {
@@ -136,7 +170,10 @@ impl<D: Devices> Controller<D> {
     }
 
     fn service_deadlines_after_resume(&mut self, resumed: bool) {
-        if Instant::now() >= self.deadline && self.mode == BacklightMode::Manual {
+        if !self.manual_forever
+            && Instant::now() >= self.deadline
+            && self.mode == BacklightMode::Manual
+        {
             self.mode = BacklightMode::Auto;
             self.devices.set_manual_target(None);
         }
@@ -157,7 +194,9 @@ impl<D: Devices> Controller<D> {
             }
         }
         // Check even when requests keep arriving, so neither deadline starves.
-        if Instant::now() >= self.deadline {
+        if !(self.mode == BacklightMode::Manual && self.manual_forever)
+            && Instant::now() >= self.deadline
+        {
             if let Err(err) = self.expire() {
                 log::error!("Automatic adjustment failed: {err}");
             }
@@ -179,7 +218,11 @@ impl<D: Devices> Controller<D> {
     }
 
     fn next_deadline(&self) -> Instant {
-        let deadline = self.deadline.min(self.refresh_deadline);
+        let deadline = if self.mode == BacklightMode::Manual && self.manual_forever {
+            self.refresh_deadline
+        } else {
+            self.deadline.min(self.refresh_deadline)
+        };
         self.pending_refresh
             .as_ref()
             .map_or(deadline, |pending| deadline.min(pending.deadline))
@@ -218,7 +261,7 @@ impl<D: Devices> Controller<D> {
                     _ => unreachable!(),
                 };
                 self.mode = BacklightMode::Manual;
-                self.deadline = Instant::now() + MANUAL_DURATION;
+                self.begin_manual();
                 // Record intent before I/O so recovery scans inherit it even if
                 // this operation only succeeds on some of the monitors.
                 self.devices.set_manual_target(Some(target));
@@ -231,7 +274,7 @@ impl<D: Devices> Controller<D> {
                 } else {
                     self.devices
                         .set_manual_target(Some(self.devices.brightness()));
-                    self.deadline = Instant::now() + MANUAL_DURATION;
+                    self.begin_manual();
                 }
             }
             BacklightCommand::GetInfo | BacklightCommand::NotifyHotplug => {}
@@ -284,6 +327,10 @@ pub(crate) fn run_controller(
         }
         match request {
             Ok(Some(request)) => {
+                if let Some(config) = request.reload {
+                    controller.reload(config);
+                    continue;
+                }
                 let _ = request
                     .reply
                     .send(controller.command_at(request.command, request.received_at));
@@ -372,6 +419,25 @@ mod tests {
         c.adjust().unwrap();
         c
     }
+    #[test]
+    fn reload_preserves_manual_start_and_supports_forever() {
+        let mut c = controller();
+        c.command(BacklightCommand::SetBrightness(85)).unwrap();
+        let started = c.manual_started.unwrap();
+        let deadline = c.deadline;
+        c.reload(std::sync::Arc::new(
+            crate::config::Config::parse("[manual]\noverride_duration = 'forever'").unwrap(),
+        ));
+        c.deadline = Instant::now();
+        c.service_deadlines();
+        assert_eq!(c.mode, BacklightMode::Manual);
+        assert_eq!(c.next_deadline(), c.refresh_deadline);
+        c.reload(std::sync::Arc::new(crate::config::Config::default()));
+        assert_eq!(c.manual_started, Some(started));
+        assert_eq!(c.deadline, deadline);
+        assert_eq!(c.devices.hardware_brightness, 85);
+    }
+
     #[test]
     fn recovered_monitor_inherits_absolute_and_relative_manual_targets() {
         let mut c = controller();

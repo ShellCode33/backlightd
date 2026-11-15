@@ -1,6 +1,5 @@
 use core::f64;
 use std::{
-    env::{self, VarError},
     fs,
     path::Path,
     sync::Mutex,
@@ -131,34 +130,6 @@ impl LocationState {
     }
 }
 
-fn find_location_from_config() -> anyhow::Result<(f64, f64)> {
-    let location_str = match env::var("BACKLIGHTD_LOCATION") {
-        Ok(loc) => loc,
-        Err(err) => match err {
-            VarError::NotPresent => return Err(anyhow::Error::new(VarError::NotPresent)),
-            VarError::NotUnicode(str) => {
-                bail!("Invalid environment variable value: {str:?}");
-            }
-        },
-    };
-
-    let (lat, long) = location_str.split_once(',').with_context(|| {
-        "Invalid BACKLIGHTD_LOCATION, expected a comma between latitude and longitude"
-    })?;
-
-    let lat = lat
-        .trim()
-        .parse()
-        .with_context(|| "Unable to parse latitude to float")?;
-
-    let long = long
-        .trim()
-        .parse()
-        .with_context(|| "Unable to parse longitude to float")?;
-
-    validate_coordinates(lat, long)
-}
-
 fn fetch_ip_location() -> anyhow::Result<(f64, f64)> {
     debug!("Trying to get location from public API...");
     // The global budget covers DNS, connection setup, headers, and body reads.
@@ -190,46 +161,27 @@ fn find_ip_location() -> anyhow::Result<(f64, f64)> {
 }
 
 pub(crate) fn find_location() -> anyhow::Result<Option<(f64, f64)>> {
-    match find_location_from_config() {
-        Ok(location) => {
-            info!("Using location from configuration: {location:?}");
-            return Ok(Some(location));
-        }
-        Err(err) => match err.downcast_ref::<VarError>() {
-            Some(VarError::NotPresent) => {}
-            _ => bail!("{err}"),
+    let settings = crate::config::current();
+    match settings.location.source {
+        crate::config::LocationSource::Manual => Ok(Some((
+            settings.location.latitude.unwrap(),
+            settings.location.longitude.unwrap(),
+        ))),
+        crate::config::LocationSource::None => Ok(None),
+        crate::config::LocationSource::Ip => match find_ip_location() {
+            Ok(location) => Ok(Some(location)),
+            Err(err) => {
+                warn!("IP location unavailable; using clock schedule: {err}");
+                Ok(None)
+            }
         },
     }
-
-    let allow_api_call = match env::var("BACKLIGHTD_ENABLE_LOCATION_API") {
-        Ok(value) => ["1", "y", "yes"].contains(&value.as_ref()),
-        Err(err) => match err {
-            VarError::NotPresent => true,
-            VarError::NotUnicode(str) => {
-                bail!("Invalid environment variable value: {str:?}");
-            }
-        },
-    };
-
-    Ok(if allow_api_call {
-        match find_ip_location() {
-            Ok(location) => Some(location),
-            Err(err) => {
-                warn!("Failed to get location using public API: {err}");
-                info!("Fallback to clock based brightness adjustement");
-                None
-            }
-        }
-    } else {
-        warn!("Unable to find your location, you might want to configure backlightd or to allow the usage of the public API");
-        info!("Fallback to clock based brightness adjustement");
-        None
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     struct Fixture(std::path::PathBuf);
     impl Fixture {

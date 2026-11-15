@@ -44,22 +44,25 @@ Automatic brightness transitions between 1% and 100% over four-hour ramps.
 Without a usable solar schedule, it uses morning and evening ramps starting at
 06:00 and 18:00 local time. There is no ambient-light sensor integration.
 
-## Configure automatic brightness
+## Configuration
 
-By default, backlightd estimates your location through the external **ip-api.com**
-service over HTTP and caches it. To supply coordinates and disable IP lookup,
-run `sudo systemctl edit backlightd` and add:
+Edit `/etc/backlightd/config.toml`; the installed file includes comments explaining
+each setting. Installation preserves an existing configuration.
 
-```ini
-[Service]
-Environment=BACKLIGHTD_LOCATION=48.8566,2.3522
-Environment=BACKLIGHTD_ENABLE_LOCATION_API=0
+```sh
+backlightd --check-config
+sudo systemctl kill --signal=HUP backlightd
 ```
 
-Then run `sudo systemctl restart backlightd`. To use only the clock-based schedule,
-set `BACKLIGHTD_ENABLE_LOCATION_API=0` without specifying coordinates.
+Use `backlightd --config PATH --check-config` to validate another file. Invalid
+reloads preserve the running settings. The daemon uses defaults if the default
+file is absent; an explicitly supplied missing file is an error.
 
-For troubleshooting, use `journalctl -u backlightd -b`. Enable debug logs by adding
-`Environment=BACKLIGHTD_LOG_LEVEL=backlightd=debug` to the same service override
-and restarting the daemon. Monitor and adapter support varies; check the logs
-if a screen is missing or does not respond.
+Configure location, manual override duration (including `"forever"`), and logging
+in this file. For troubleshooting, set `[logging] level = "debug"` and inspect
+`journalctl -u backlightd -b`.
+
+Legacy `BACKLIGHTD_LOCATION`, `BACKLIGHTD_ENABLE_LOCATION_API`, and
+`BACKLIGHTD_LOG_LEVEL` environment settings remain supported as overrides.
+Manual coordinates take precedence over the IP lookup setting. No systemd
+override is needed for new installations.
