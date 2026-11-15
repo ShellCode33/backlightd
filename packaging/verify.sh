@@ -22,7 +22,10 @@ grep -q '/usr/bin/backlightctl --notify-hotplug' /usr/lib/udev/rules.d/95-backli
 printf '\n# package-reinstall-preservation-test\n' >> /etc/backlightd/config.toml
 case "$family" in
     deb) dpkg -i "$package" ;;
-    rpm) rpm -Uvh --replacepkgs "$package" ;;
+    rpm)
+        if command -v dnf >/dev/null; then dnf reinstall -y "$package"
+        else rpm -Uvh --replacepkgs "$package"; fi
+        ;;
     arch) pacman -U --noconfirm "$package" ;;
 esac
 grep -q 'package-reinstall-preservation-test' /etc/backlightd/config.toml
