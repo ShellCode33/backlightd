@@ -14,9 +14,46 @@ static CURRENT: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Config {
+    pub automatic: Automatic,
     pub location: Location,
     pub manual: Manual,
     pub logging: Logging,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Schedule {
+    Solar,
+    Clock,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Automatic {
+    pub schedule: Schedule,
+    pub minimum_percent: u8,
+    pub maximum_percent: u8,
+    pub transition_duration: String,
+    pub morning: String,
+    pub evening: String,
+}
+impl Default for Automatic {
+    fn default() -> Self {
+        Self {
+            schedule: Schedule::Solar,
+            minimum_percent: 10,
+            maximum_percent: 100,
+            transition_duration: "4h".into(),
+            morning: "06:00".into(),
+            evening: "18:00".into(),
+        }
+    }
+}
+pub(crate) fn clock(value: &str) -> anyhow::Result<chrono::NaiveTime> {
+    anyhow::ensure!(
+        value.len() == 5 && value.as_bytes()[2] == b':',
+        "Clock time must be HH:MM"
+    );
+    chrono::NaiveTime::parse_from_str(value, "%H:%M").context("Invalid clock time")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -36,7 +73,7 @@ pub(crate) struct Location {
 impl Default for Location {
     fn default() -> Self {
         Self {
-            source: LocationSource::Ip,
+            source: LocationSource::None,
             latitude: None,
             longitude: None,
         }
@@ -99,6 +136,25 @@ impl Config {
         }
     }
     pub fn validate(&self) -> anyhow::Result<()> {
+        use chrono::Timelike;
+        let auto = &self.automatic;
+        anyhow::ensure!(
+            auto.minimum_percent >= 1
+                && auto.minimum_percent <= auto.maximum_percent
+                && auto.maximum_percent <= 100,
+            "automatic brightness must satisfy 1 <= minimum_percent <= maximum_percent <= 100"
+        );
+        let morning = clock(&auto.morning)
+            .context("automatic.morning")?
+            .num_seconds_from_midnight();
+        let evening = clock(&auto.evening)
+            .context("automatic.evening")?
+            .num_seconds_from_midnight();
+        let gap = (evening + 86400 - morning) % 86400;
+        let transition =
+            duration(&auto.transition_duration).context("automatic.transition_duration")?;
+        anyhow::ensure!(gap > 0 && transition.as_secs() <= u64::from(gap.min(86400 - gap)), "Clock schedule transitions overlap; shorten automatic.transition_duration or separate morning/evening");
+
         if self.manual.override_duration != "forever" {
             duration(&self.manual.override_duration).context("manual.override_duration")?;
         }
@@ -169,6 +225,24 @@ pub(crate) fn publish(config: Arc<Config>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn schedule_validation_and_safe_defaults() {
+        let defaults = Config::default();
+        assert_eq!(defaults.location.source, LocationSource::None);
+        assert_eq!(defaults.automatic.minimum_percent, 10);
+        assert!(Config::parse("[automatic]\nmorning = '22:00'\nevening = '10:00'").is_ok());
+        for text in [
+            "[automatic]\nminimum_percent = 0",
+            "[automatic]\nmaximum_percent = 101",
+            "[automatic]\nmorning = '6:00'",
+            "[automatic]\nevening = '06:00'",
+            "[automatic]\ntransition_duration = '13h'",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        Config::parse(include_str!("../../backlightd.toml")).unwrap();
+    }
+
     #[test]
     fn defaults_partial_files_and_validation() {
         assert_eq!(

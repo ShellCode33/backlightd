@@ -4,10 +4,25 @@
 # Reload: sudo systemctl kill --signal=HUP backlightd
 # A rejected reload leaves the running settings unchanged.
 
+[automatic]
+# "solar" uses sunrise/sunset with a clock fallback; "clock" always uses local times.
+schedule = "solar"
+# Limits apply only to automatic targets. Manual commands can still request 0-100%.
+# These are device-control percentages, not calibrated luminance measurements.
+minimum_percent = 10
+maximum_percent = 100
+# Ramps must fit between the clock anchors. Solar overlaps use the clock schedule.
+transition_duration = "4h"
+# HH:MM in the machine's local time zone. Overnight schedules are supported.
+# Repeated DST times use the first occurrence; skipped times advance to a valid minute.
+# A clock ramp shortens if DST leaves less real time before the next anchor.
+morning = "06:00"
+evening = "18:00"
+
 [location]
 # "none" uses the local clock schedule; "manual" uses coordinates;
 # "ip" contacts ip-api.com over HTTP and caches its estimate.
-source = "ip"
+source = "none"
 # Set both coordinates when source = "manual". North/east are positive.
 # latitude = 48.8566
 # longitude = 2.3522

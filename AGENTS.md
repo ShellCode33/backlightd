@@ -83,7 +83,7 @@ Status reports the integer average of stored device percentages, not a fresh
 hardware read. Avoid treating those values as authoritative forever.
 
 Auto mode computes both the target and the next time it can change. Keep the
-four-hour solar ramps; missing solar events or overlapping transitions fall back
+configured solar ramps (four hours by default); missing solar events or overlapping transitions fall back
 to the clock schedule rather than compressing ramps. Preserve behavior across
 midnight and unusual time zones.
 
@@ -108,7 +108,7 @@ child processes with fake controllers, never against the live daemon. A blocked
 hardware operation may still require systemd's stop timeout to terminate it.
 
 Location comes from `BACKLIGHTD_LOCATION=latitude,longitude` first. IP lookup is
-enabled by default; `BACKLIGHTD_ENABLE_LOCATION_API=0` disables it. The lookup
+opt-in through `[location] source = "ip"`; `BACKLIGHTD_ENABLE_LOCATION_API=0` disables it. The lookup
 uses HTTP ip-api.com with a two-second request budget. Valid stale coordinates
 survive lookup failures; retries back off for five minutes. The TOML cache is
 `/var/cache/backlightd/last_known_location.toml`, refreshed after 12 hours.

@@ -1,29 +1,29 @@
 use std::time::Duration;
 
+use crate::config::{Automatic, Schedule};
 use anyhow::Context;
-use chrono::{DateTime, Local, NaiveTime};
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use sunrise::{Coordinates, SolarDay, SolarEvent};
 
 use crate::location::find_location;
 
-const BRIGHTNESS_TRANSITION_DURATION: Duration = Duration::from_secs(4 * 60 * 60);
-const FALLBACK_BRIGHTNESS_UP_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_opt(6, 0, 0);
-const FALLBACK_BRIGHTNESS_DOWN_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_opt(18, 0, 0);
-
-// Calculate both the target and the next time it can change. No hardware polling.
+// Return the next representable logical percentage transition, without polling.
 pub(crate) fn next_adjustment() -> anyhow::Result<(u8, Duration)> {
-    match find_location()? {
-        Some((latitude, longitude)) => {
-            get_brightness_based_on_location(latitude, longitude, Local::now())
+    let config = crate::config::current();
+    let now = Local::now();
+    if config.automatic.schedule == Schedule::Solar {
+        if let Some((latitude, longitude)) = find_location()? {
+            return location_schedule(latitude, longitude, now, &config.automatic);
         }
-        None => Ok(get_brightness_based_on_time(Local::now())),
     }
+    Ok(clock_schedule(now, &config.automatic))
 }
 
-fn get_brightness_based_on_location(
+fn location_schedule(
     latitude: f64,
     longitude: f64,
     now: DateTime<Local>,
+    settings: &Automatic,
 ) -> anyhow::Result<(u8, Duration)> {
     let coordinates =
         Coordinates::new(latitude, longitude).context("Invalid location coordinates")?;
@@ -39,28 +39,30 @@ fn get_brightness_based_on_location(
             day.event_time(SolarEvent::Sunset),
         ) else {
             // A complete neighboring cycle is needed to check for overlap.
-            return Ok(get_brightness_based_on_time(now));
+            return Ok(clock_schedule(now, settings));
         };
         if sunrise >= sunset {
-            return Ok(get_brightness_based_on_time(now));
+            return Ok(clock_schedule(now, settings));
         }
         days.push((sunrise.with_timezone(&Local), sunset.with_timezone(&Local)));
     }
-    Ok(solar_schedule(now, &days).unwrap_or_else(|| get_brightness_based_on_time(now)))
+    Ok(solar_schedule_with_settings(now, &days, settings)
+        .unwrap_or_else(|| clock_schedule(now, settings)))
 }
 
-fn solar_schedule(
+fn solar_schedule_with_settings(
     now: DateTime<Local>,
     days: &[(DateTime<Local>, DateTime<Local>)],
+    settings: &Automatic,
 ) -> Option<(u8, Duration)> {
-    // Keep the established four-hour ramps. If the surrounding solar cycles
+    let duration =
+        crate::config::duration(&settings.transition_duration).expect("validated duration");
+    // Keep the configured ramps. If the surrounding solar cycles
     // cannot fit them, let the caller use the regular clock-based schedule.
     if days
         .iter()
-        .any(|(sunrise, sunset)| *sunrise + BRIGHTNESS_TRANSITION_DURATION > *sunset)
-        || days
-            .windows(2)
-            .any(|pair| pair[0].1 + BRIGHTNESS_TRANSITION_DURATION > pair[1].0)
+        .any(|(sunrise, sunset)| *sunrise + duration > *sunset)
+        || days.windows(2).any(|pair| pair[0].1 + duration > pair[1].0)
     {
         return None;
     }
@@ -71,9 +73,10 @@ fn solar_schedule(
         .unwrap_or(0);
     let &(sunrise, sunset) = days.get(index)?;
     let next_sunrise = days.get(index + 1).map(|(sunrise, _)| *sunrise);
-    let up_end = sunrise + BRIGHTNESS_TRANSITION_DURATION;
-    let down_end = sunset + BRIGHTNESS_TRANSITION_DURATION;
-    let (brightness, mut delay) = scheduled_brightness(now, sunrise, up_end, sunset, down_end);
+    let up_end = sunrise + duration;
+    let down_end = sunset + duration;
+    let (brightness, mut delay) =
+        scheduled_with_settings(now, sunrise, up_end, sunset, down_end, settings);
     if let Some(next) = next_sunrise {
         if let Ok(until_sunrise) = (next - now).to_std() {
             delay = delay.min(until_sunrise);
@@ -82,106 +85,169 @@ fn solar_schedule(
     Some((brightness, delay))
 }
 
-fn get_brightness_based_on_time(now: DateTime<Local>) -> (u8, Duration) {
-    scheduled_brightness(
-        now,
-        now.with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
-            .unwrap(),
-        now.with_time(FALLBACK_BRIGHTNESS_UP_BEGIN.unwrap())
-            .unwrap()
-            + BRIGHTNESS_TRANSITION_DURATION,
-        now.with_time(FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap())
-            .unwrap(),
-        now.with_time(FALLBACK_BRIGHTNESS_DOWN_BEGIN.unwrap())
-            .unwrap()
-            + BRIGHTNESS_TRANSITION_DURATION,
-    )
+// Choose the earliest occurrence of a repeated local time. Move a nonexistent
+// local time forward to the first valid minute (also covers skipped dates).
+fn local_time<T: TimeZone>(zone: &T, mut time: NaiveDateTime) -> Option<DateTime<T>> {
+    for _ in 0..=48 * 60 {
+        match zone.from_local_datetime(&time) {
+            chrono::LocalResult::Single(at) => return Some(at),
+            chrono::LocalResult::Ambiguous(a, b) => return Some(a.min(b)),
+            chrono::LocalResult::None => {}
+        }
+        time = time.checked_add_signed(chrono::Duration::minutes(1))?;
+    }
+    None
 }
 
-fn scheduled_brightness(
-    now: DateTime<Local>,
-    up_begin: DateTime<Local>,
-    up_end: DateTime<Local>,
-    down_begin: DateTime<Local>,
-    down_end: DateTime<Local>,
-) -> (u8, Duration) {
-    let brightness = compute_brightness_percentage(now, up_begin, up_end, down_begin, down_end);
-    // Recalculate the solar schedule at the next local date boundary as well.
-    let midnight = now
-        .date_naive()
+fn clock_schedule(now: DateTime<Local>, settings: &Automatic) -> (u8, Duration) {
+    let duration =
+        crate::config::duration(&settings.transition_duration).expect("validated duration");
+    let morning = crate::config::clock(&settings.morning).expect("validated time");
+    let evening = crate::config::clock(&settings.evening).expect("validated time");
+    let mut phases = Vec::new();
+    for offset in -2..=2 {
+        if let Some(date) = now
+            .date_naive()
+            .checked_add_signed(chrono::Duration::days(offset))
+        {
+            for (time, rising) in [(morning, true), (evening, false)] {
+                if let Some(at) = local_time(&Local, date.and_time(time)) {
+                    phases.push((at, rising));
+                }
+            }
+        }
+    }
+    phases.sort_by_key(|(at, _)| *at);
+    phases.dedup_by_key(|(at, _)| *at);
+    if let Some(index) = phases.iter().rposition(|(at, _)| *at <= now) {
+        let (start, rising) = phases[index];
+        if let Some((next, _)) = phases.get(index + 1) {
+            // DST can shorten the real interval between local-clock anchors.
+            let end = (start + duration).min(*next);
+            return ramp(now, start, end, *next, rising, settings);
+        }
+    }
+    (settings.minimum_percent, Duration::from_secs(60 * 60))
+}
+
+fn next_midnight(now: DateTime<Local>) -> DateTime<Local> {
+    now.date_naive()
         .succ_opt()
-        .unwrap()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_local_timezone(Local)
-        .earliest()
-        .unwrap_or(now + chrono::Duration::hours(1));
-    let next = if now < up_begin {
-        up_begin
-            + chrono::Duration::seconds(
-                ((up_end - up_begin).num_seconds() as f64 / 198.).ceil() as i64
-            )
-    } else if now < up_end && brightness < 100 {
-        up_begin
-            + chrono::Duration::seconds(
-                (((brightness as f64 - 0.5) / 99.) * (up_end - up_begin).num_seconds() as f64)
-                    .ceil() as i64,
-            )
-    } else if now < down_begin {
-        down_begin
-            + chrono::Duration::seconds(
-                ((down_end - down_begin).num_seconds() as f64 / 198.).floor() as i64 + 1,
-            )
-    } else if now < down_end && brightness > 1 {
-        down_begin
-            + chrono::Duration::seconds(
-                (((100.5 - brightness as f64) / 99.) * (down_end - down_begin).num_seconds() as f64)
-                    .floor() as i64
-                    + 1,
-            )
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .and_then(|time| local_time(&Local, time))
+        .filter(|next| *next > now)
+        .unwrap_or(now + chrono::Duration::hours(1))
+}
+
+fn ramp(
+    now: DateTime<Local>,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+    next_phase: DateTime<Local>,
+    rising: bool,
+    settings: &Automatic,
+) -> (u8, Duration) {
+    let range = f64::from(settings.maximum_percent - settings.minimum_percent);
+    let span = (end - start).num_seconds().max(1) as f64;
+    let progress = ((now - start).num_seconds() as f64 / span).clamp(0., 1.);
+    let value = (f64::from(settings.minimum_percent)
+        + range * if rising { progress } else { 1. - progress })
+    .round() as u8;
+    let next = if range == 0. || now >= end {
+        next_phase
+    } else if rising {
+        let seconds =
+            ((f64::from(value - settings.minimum_percent) + 0.5) / range * span).ceil() as i64;
+        start + chrono::Duration::seconds(seconds)
     } else {
-        midnight
+        let seconds =
+            ((f64::from(settings.maximum_percent - value) + 0.5) / range * span).floor() as i64 + 1;
+        start + chrono::Duration::seconds(seconds)
     };
     (
-        brightness,
-        (next.min(midnight) - now)
+        value,
+        (next.min(next_midnight(now)) - now)
             .to_std()
             .unwrap_or(Duration::from_secs(1))
             .max(Duration::from_secs(1)),
     )
 }
 
-fn compute_brightness_percentage(
+fn scheduled_with_settings(
     now: DateTime<Local>,
-    brightness_up_begin: DateTime<Local>,
-    brightness_up_end: DateTime<Local>,
-    brightness_down_begin: DateTime<Local>,
-    brightness_down_end: DateTime<Local>,
-) -> u8 {
-    assert!(brightness_up_begin < brightness_up_end);
-    assert!(brightness_up_end <= brightness_down_begin);
-    assert!(brightness_down_begin < brightness_down_end);
-
-    if now < brightness_up_begin || now > brightness_down_end {
-        1
-    } else if now > brightness_up_end && now < brightness_down_begin {
-        100
-    } else if now >= brightness_up_begin && now <= brightness_up_end {
-        let duration = (brightness_up_end - brightness_up_begin).num_seconds() as f64;
-        let elapsed = (now - brightness_up_begin).num_seconds() as f64;
-        ((elapsed / duration * 99.) + 1.).round() as u8
-    } else if now >= brightness_down_begin && now <= brightness_down_end {
-        let duration = (brightness_down_end - brightness_down_begin).num_seconds() as f64;
-        let elapsed = (now - brightness_down_begin).num_seconds() as f64;
-        ((1. - elapsed / duration) * 99. + 1.).round() as u8
+    up_begin: DateTime<Local>,
+    up_end: DateTime<Local>,
+    down_begin: DateTime<Local>,
+    down_end: DateTime<Local>,
+    settings: &Automatic,
+) -> (u8, Duration) {
+    if now < up_end {
+        ramp(now, up_begin, up_end, down_begin, true, settings)
     } else {
-        unreachable!()
+        ramp(
+            now,
+            down_begin,
+            down_end,
+            next_midnight(now),
+            false,
+            settings,
+        )
     }
 }
 
 #[cfg(test)]
+fn legacy() -> Automatic {
+    Automatic {
+        minimum_percent: 1,
+        ..Automatic::default()
+    }
+}
+#[cfg(test)]
+fn get_brightness_based_on_location(
+    lat: f64,
+    lon: f64,
+    now: DateTime<Local>,
+) -> anyhow::Result<(u8, Duration)> {
+    location_schedule(lat, lon, now, &legacy())
+}
+#[cfg(test)]
+fn get_brightness_based_on_time(now: DateTime<Local>) -> (u8, Duration) {
+    clock_schedule(now, &legacy())
+}
+#[cfg(test)]
+fn solar_schedule(
+    now: DateTime<Local>,
+    days: &[(DateTime<Local>, DateTime<Local>)],
+) -> Option<(u8, Duration)> {
+    solar_schedule_with_settings(now, days, &legacy())
+}
+#[cfg(test)]
+fn scheduled_brightness(
+    now: DateTime<Local>,
+    a: DateTime<Local>,
+    b: DateTime<Local>,
+    c: DateTime<Local>,
+    d: DateTime<Local>,
+) -> (u8, Duration) {
+    scheduled_with_settings(now, a, b, c, d, &legacy())
+}
+#[cfg(test)]
+fn compute_brightness_percentage(
+    now: DateTime<Local>,
+    a: DateTime<Local>,
+    b: DateTime<Local>,
+    c: DateTime<Local>,
+    d: DateTime<Local>,
+) -> u8 {
+    scheduled_brightness(now, a, b, c, d).0
+}
+
+#[cfg(test)]
 mod tests {
-    use chrono::Timelike;
+    use chrono::{NaiveTime, Timelike};
+    const BRIGHTNESS_TRANSITION_DURATION: Duration = Duration::from_secs(4 * 3600);
+    const FALLBACK_BRIGHTNESS_UP_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_opt(6, 0, 0);
+    const FALLBACK_BRIGHTNESS_DOWN_BEGIN: Option<NaiveTime> = NaiveTime::from_hms_opt(18, 0, 0);
 
     use super::*;
 
@@ -191,6 +257,64 @@ mod tests {
             .with_ymd_and_hms(2026, 12, day, hour, 0, 0)
             .single()
             .unwrap()
+    }
+
+    #[test]
+    fn configured_limits_overnight_and_constant_schedules() {
+        let settings = Automatic {
+            minimum_percent: 20,
+            maximum_percent: 80,
+            morning: "22:00".into(),
+            evening: "10:00".into(),
+            transition_duration: "2h".into(),
+            ..Automatic::default()
+        };
+        for (hour, expected) in [
+            (21, 20),
+            (22, 20),
+            (23, 50),
+            (0, 80),
+            (9, 80),
+            (10, 80),
+            (11, 50),
+            (12, 20),
+        ] {
+            assert_eq!(clock_schedule(at(21, hour), &settings).0, expected);
+        }
+        let constant = Automatic {
+            minimum_percent: 42,
+            maximum_percent: 42,
+            ..Automatic::default()
+        };
+        for hour in 0..24 {
+            assert_eq!(clock_schedule(at(21, hour), &constant).0, 42);
+        }
+    }
+
+    #[test]
+    fn daylight_saving_and_skipped_dates_resolve_without_panics() {
+        let zone = std::env::var("TZ").unwrap_or_default();
+        let cases = match zone.as_str() {
+            "America/New_York" => vec![
+                ("2026-03-08 02:30", "2026-03-08 03:00"),
+                ("2026-11-01 01:30", "2026-11-01 01:30"),
+            ],
+            "Europe/Berlin" => vec![
+                ("2026-03-29 02:30", "2026-03-29 03:00"),
+                ("2026-10-25 02:30", "2026-10-25 02:30"),
+            ],
+            "Pacific/Apia" => vec![("2011-12-30 06:00", "2011-12-31 00:00")],
+            _ => vec![],
+        };
+        for (input, expected) in cases {
+            let naive = NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M").unwrap();
+            let resolved = local_time(&Local, naive).unwrap();
+            assert_eq!(resolved.format("%Y-%m-%d %H:%M").to_string(), expected);
+            assert!(clock_schedule(resolved, &Automatic::default()).1 > Duration::ZERO);
+            if let chrono::LocalResult::Ambiguous(a, b) = Local.from_local_datetime(&naive) {
+                assert_eq!(resolved, a.min(b));
+            }
+        }
     }
 
     #[test]

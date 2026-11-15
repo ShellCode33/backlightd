@@ -40,7 +40,7 @@ backlightctl --refresh        # Rediscover monitors and wait for completion
 ```
 
 A manual adjustment overrides auto mode for 12 hours, including time suspended.
-Automatic brightness transitions between 1% and 100% over four-hour ramps.
+Automatic brightness defaults to 10–100% over four-hour ramps.
 Without a usable solar schedule, it uses morning and evening ramps starting at
 06:00 and 18:00 local time. There is no ambient-light sensor integration.
 
@@ -58,8 +58,9 @@ Use `backlightd --config PATH --check-config` to validate another file. Invalid
 reloads preserve the running settings. The daemon uses defaults if the default
 file is absent; an explicitly supplied missing file is an error.
 
-Configure location, manual override duration (including `"forever"`), and logging
-in this file. For troubleshooting, set `[logging] level = "debug"` and inspect
+Configure automatic limits and transition times, location, manual override
+duration (including `"forever"`), and logging in this file. IP location lookup
+is opt-in: choose `source = "ip"`, or provide manual coordinates. For troubleshooting, set `[logging] level = "debug"` and inspect
 `journalctl -u backlightd -b`.
 
 Legacy `BACKLIGHTD_LOCATION`, `BACKLIGHTD_ENABLE_LOCATION_API`, and
