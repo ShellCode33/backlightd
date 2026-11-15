@@ -1,5 +1,7 @@
-/// The bible for DDC:
-/// https://milek7.pl/ddcbacklight/mccs.pdf
+//! External-monitor adapter using `ddc-hi` and DDC/CI VCP features.
+//!
+//! Brightness is VCP 0x10, power is 0xD6. Writes narrow to the 16-bit wire type
+//! after validation; successful writes invalidate cached readback evidence.
 use std::{error::Error, fmt::Display as ErrorDisplay, thread, time::Duration};
 
 use anyhow::{bail, Context};

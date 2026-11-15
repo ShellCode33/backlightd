@@ -1,3 +1,8 @@
+//! Linux backlight-class adapter for brightness, optional actual readings, and power.
+//!
+//! Raw values are 32-bit; the historical `acpi:` configuration ID is preserved.
+//! `bl_power` is independent of brightness and compositor DPMS.
+
 use std::{fs, io::Write, path::PathBuf};
 
 use anyhow::{bail, Context};

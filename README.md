@@ -89,3 +89,10 @@ the next brightness command uses the new mapping. Auto mode reapplies its target
 Screens with identical EDIDs share configuration IDs; devices without EDID use
 an identifier that can depend on their bus. Calibration cannot infer physical
 luminance or room lighting without measurement.
+
+## Documentation
+
+See the [user wiki](docs/wiki/Home.md) for the full CLI, configuration, calibration,
+and troubleshooting guide. Developer guides and the IPC API are available through
+`cargo doc --workspace --no-deps`. [Documentation maintenance](docs/README.md)
+explains local builds and later docs.rs/GitHub wiki publication.

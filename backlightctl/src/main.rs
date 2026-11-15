@@ -1,3 +1,9 @@
+//! CLI translation and presentation for the shared backlight IPC protocol.
+//!
+//! Mutations are followed by a status request on the same connection. Device
+//! enumeration fetches one indexed record per bounded response; normal JSON status
+//! retains its two-field shape. See `docs/wiki/CLI.md` for the user reference.
+
 use std::{io::BufReader, os::unix::net::UnixStream, path::PathBuf, process::exit};
 
 use backlight_ipc::{BacklightCommand, BacklightMode, DEFAULT_UNIX_SOCKET_PATH};

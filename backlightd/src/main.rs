@@ -1,3 +1,8 @@
+//! Executable entry point, event-driven client serving, and coordinated lifecycle.
+//!
+//! Technical guides are in the companion library target. Build this executable
+//! explicitly with private-item rustdoc when inspecting internal runtime types.
+
 use std::{
     env,
     io::{self, BufReader},

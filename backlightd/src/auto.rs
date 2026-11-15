@@ -1,3 +1,8 @@
+//! Solar and local-clock schedules with bounded ramps and explicit next deadlines.
+//!
+//! Polar/overlapping solar cycles use clock fallback. Local anchors resolve DST
+//! gaps and repetitions explicitly; scheduling does not poll hardware.
+
 use std::time::Duration;
 
 use crate::config::{Automatic, Schedule};

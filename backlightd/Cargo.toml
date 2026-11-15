@@ -17,3 +17,11 @@ serde = "1.0.229"
 toml = "1.2.1"
 boot-time = "0.1.3"
 libc = "0.2.191"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[[bin]]
+name = "backlightd"
+path = "src/main.rs"
+doc = false

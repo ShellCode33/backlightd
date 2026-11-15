@@ -135,6 +135,16 @@ currently uses `ddc-hi`, not libddcutil bindings. Broad Linux distribution suppo
 matters; do not introduce a dependency on a particular libddcutil shared library
 version without discussion.
 
+## Documentation
+
+The user manual is `docs/wiki/` (GitHub wiki page links and `_Sidebar.md`).
+Code-focused guides live under `backlightd/src/docs/` and are included by the
+lightweight `backlightd/src/lib.rs` documentation target; runtime internals remain
+in the executable. Document public wire types in `backlight_ipc/src/lib.rs`.
+Run rustdoc with warnings denied and run doctests after changing Rust examples.
+See `docs/README.md` for build and future publication instructions. Do not publish
+crates or push the separate wiki repository without explicit authorization.
+
 ## Build and validation
 
 The workspace declares Rust 1.86 as its minimum version. Linux builds need a C

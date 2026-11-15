@@ -1,3 +1,8 @@
+//! Serialized commands, mode/override state, configuration application, and deadlines.
+//!
+//! Discovery intentionally blocks following commands. Boottime deadlines include
+//! suspend; manual intent is recorded before hardware I/O and survives recovery.
+
 use std::{sync::mpsc::Sender, time::Duration};
 
 use anyhow::bail;

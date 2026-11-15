@@ -1,3 +1,8 @@
+//! Controller-owned discovery, logical device operations, and bounded recovery.
+//!
+//! Calibration wraps hardware devices after discovery. Retain failed absolute
+//! targets so retries never apply a relative increment/decrement twice.
+
 use std::{fs, sync::Mutex, time::Instant};
 
 use crate::ddc::BacklightDdcDevice;
