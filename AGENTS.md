@@ -16,8 +16,10 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
 
 ## Workspace map
 
-- `backlightd/src/main.rs`: system daemon, Unix socket, bounded client workers,
-  request/reply routing, logging, and thread supervision.
+- `backlightd/src/main.rs`: event-driven listener, bounded client workers,
+  request/reply routing, controller supervision, and coordinated shutdown.
+- `backlightd/src/shutdown.rs`: blocks SIGTERM/SIGINT before spawning workers
+  and receives them through signalfd on the main thread.
 - `backlightd/src/controller.rs`: serializes commands, discovery, mode changes,
   brightness targets, deadlines, and hotplug debouncing.
 - `backlightd/src/monitors.rs`: active devices, stable identities, manual-target
@@ -92,6 +94,14 @@ IPC is newline-delimited serde JSON with a 4 KiB message limit. Keep one buffere
 reader per connection, preserve command ordering and error propagation, and
 bound client resources and socket I/O. There is no bincode compatibility layer.
 The default socket is `/run/backlightd.sock`.
+
+On termination, stop accepting clients, close their connections, and signal the
+controller to exit after its current operation. Join the controller and client
+workers before releasing socket ownership. Do not execute queued commands after
+shutdown is requested. `NotifyShutdown` from IPC closes only that connection;
+it is not a public daemon shutdown command. Signal tests must run in isolated
+child processes with fake controllers, never against the live daemon. A blocked
+hardware operation may still require systemd's stop timeout to terminate it.
 
 Location comes from `BACKLIGHTD_LOCATION=latitude,longitude` first. IP lookup is
 enabled by default; `BACKLIGHTD_ENABLE_LOCATION_API=0` disables it. The lookup

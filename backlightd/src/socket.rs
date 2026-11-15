@@ -3,11 +3,11 @@ use std::{
     fs::{self, File, OpenOptions},
     io, mem,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             ffi::OsStrExt,
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-            net::{Incoming, UnixListener},
+            net::{UnixListener, UnixStream},
         },
     },
     path::{Path, PathBuf},
@@ -24,8 +24,18 @@ pub(crate) struct Listener {
 }
 
 impl Listener {
-    pub(crate) fn incoming(&self) -> Incoming<'_> {
-        self.listener.incoming()
+    pub(crate) fn accept(&self) -> io::Result<UnixStream> {
+        self.listener.accept().map(|(stream, _)| stream)
+    }
+
+    pub(crate) fn set_nonblocking(&self) -> io::Result<()> {
+        self.listener.set_nonblocking(true)
+    }
+}
+
+impl AsRawFd for Listener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
     }
 }
 

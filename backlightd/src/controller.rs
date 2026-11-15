@@ -262,14 +262,27 @@ impl<D: Devices> Controller<D> {
     }
 }
 
-pub(crate) fn run_controller(receiver: Receiver<Request>) -> anyhow::Result<()> {
+pub(crate) fn run_controller(
+    receiver: Receiver<Request>,
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    if stopping.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
     let mut controller = Controller::new(Monitors);
     if let Err(err) = controller.refresh("startup") {
         log::error!("Initial monitor refresh failed: {err}");
     }
     loop {
+        if stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
         let deadline = controller.next_deadline();
-        match receiver.recv_until(deadline) {
+        let request = receiver.recv_until(deadline);
+        if stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        match request {
             Ok(Some(request)) => {
                 let _ = request
                     .reply

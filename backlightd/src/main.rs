@@ -1,10 +1,15 @@
 use std::{
     env,
     io::{self, BufReader},
-    os::unix::net::UnixStream,
+    net::Shutdown,
+    os::{fd::AsRawFd, unix::net::UnixStream},
     process::exit,
-    sync::mpsc::channel,
-    thread::{self, sleep, JoinHandle},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::channel,
+        Arc,
+    },
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -19,6 +24,7 @@ mod controller;
 mod ddc;
 mod location;
 mod monitors;
+mod shutdown;
 mod socket;
 mod wake;
 
@@ -45,58 +51,146 @@ fn main() {
         DEFAULT_UNIX_SOCKET_PATH
     };
 
-    let listener = match socket::bind(std::path::Path::new(unix_socket_path)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            log::error!("{unix_socket_path}: {err}");
-            exit(1);
-        }
-    };
+    if let Err(err) = run_server(std::path::Path::new(unix_socket_path), run_controller) {
+        log::error!("Daemon failed: {err:#}");
+        exit(1);
+    }
+}
 
-    let (auto_sender, auto_receiver) =
-        wake::channel().expect("Unable to create controller wait descriptors");
-
-    let auto_adjust_thread = thread::spawn(move || {
-        if let Err(err) = run_controller(auto_receiver) {
-            log::error!("Controller failed: {err}");
-        }
+fn run_server(
+    path: &std::path::Path,
+    controller: impl FnOnce(wake::Receiver<Request>, Arc<AtomicBool>) -> anyhow::Result<()>
+        + Send
+        + 'static,
+) -> anyhow::Result<()> {
+    let signals = shutdown::Signals::new()?;
+    let listener = socket::bind(path)?;
+    listener.set_nonblocking()?;
+    let (sender, receiver) = wake::channel()?;
+    let stopping = Arc::new(AtomicBool::new(false));
+    let controller_stopping = stopping.clone();
+    let (done, finished) = UnixStream::pair()?;
+    let controller = thread::Builder::new()
+        .name("backlight-controller".into())
+        .spawn(move || {
+            // Closing this endpoint wakes the main thread on normal exit or panic.
+            let _done = done;
+            controller(receiver, controller_stopping)
+        })?;
+    let mut workers = Vec::new();
+    let result = serve(&listener, &signals, &finished, &sender, &mut workers);
+    stopping.store(true, Ordering::Release);
+    // Wake a controller blocked on its deadline. This command is internal only;
+    // the client handler still interprets NotifyShutdown as closing a connection.
+    let (reply, _) = channel();
+    let _ = sender.send(Request {
+        command: BacklightCommand::NotifyShutdown,
+        received_at: boot_time::Instant::now(),
+        reply,
     });
-    let handle_clients_thread = thread::spawn(move || handle_clients_thread(listener, auto_sender));
+    drop(sender);
+    for worker in &workers {
+        let _ = worker.socket.shutdown(Shutdown::Both);
+    }
+    let controller_result = controller
+        .join()
+        .map_err(|_| anyhow!("Controller thread panicked"))
+        .and_then(|result| result);
+    for worker in workers {
+        if worker.join().is_err() {
+            log::error!("Client worker panicked during shutdown");
+        }
+    }
+    // listener and its ownership lock stay alive until all device work has stopped.
+    controller_result.and(result)
+}
 
+fn serve(
+    listener: &socket::Listener,
+    signals: &shutdown::Signals,
+    finished: &UnixStream,
+    sender: &Sender<Request>,
+    workers: &mut Vec<ClientWorker>,
+) -> anyhow::Result<()> {
     loop {
-        if auto_adjust_thread.is_finished() {
-            panic!("auto adjust thread is gone");
+        let mut fds = [
+            listener.as_raw_fd(),
+            signals.as_raw_fd(),
+            finished.as_raw_fd(),
+        ]
+        .map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        // SAFETY: fds is writable and all descriptors stay owned for this call.
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err.into());
         }
-
-        if handle_clients_thread.is_finished() {
-            panic!("handle_clients_thread thread is gone");
+        if fds[1].revents & libc::POLLIN != 0 {
+            signals.receive()?;
+            return Ok(());
         }
-
-        sleep(Duration::from_secs(5));
+        if fds[2].revents != 0 {
+            return Err(anyhow!("Controller stopped unexpectedly"));
+        }
+        if fds
+            .iter()
+            .any(|fd| fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0)
+            || fds[0].revents & libc::POLLHUP != 0
+        {
+            return Err(anyhow!("Daemon wait descriptor failed"));
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            match listener.accept() {
+                Ok(client) => {
+                    if let Err(err) = spawn_client(client, sender.clone(), workers) {
+                        log::error!("Unable to serve client: {err}");
+                    }
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
     }
 }
 
 const MAX_CLIENTS: usize = 16;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn handle_clients_thread(listener: socket::Listener, sender: Sender<Request>) {
-    let mut workers = Vec::new();
-    for stream in listener.incoming() {
-        match stream {
-            Ok(client) => {
-                if let Err(err) = spawn_client(client, sender.clone(), &mut workers) {
-                    log::error!("Unable to serve client: {err}");
-                }
-            }
-            Err(err) => log::error!("Failed to accept incoming client: {err}"),
-        }
+struct ClientWorker {
+    thread: JoinHandle<()>,
+    socket: Arc<UnixStream>,
+}
+
+struct DisconnectOnDrop(Arc<UnixStream>);
+impl Drop for DisconnectOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+impl ClientWorker {
+    fn is_finished(&self) -> bool {
+        self.thread.is_finished()
+    }
+    fn join(self) -> thread::Result<()> {
+        self.thread.join()
     }
 }
 
 fn spawn_client(
     client: UnixStream,
     sender: Sender<Request>,
-    workers: &mut Vec<JoinHandle<()>>,
+    workers: &mut Vec<ClientWorker>,
 ) -> io::Result<()> {
     workers.retain(|worker| !worker.is_finished());
     if workers.len() >= MAX_CLIENTS {
@@ -105,15 +199,17 @@ fn spawn_client(
             "Too many client connections",
         ));
     }
-    workers.push(
-        thread::Builder::new()
-            .name("backlight-client".into())
-            .spawn(move || {
-                if let Err(err) = handle_client(client, &sender, CLIENT_IO_TIMEOUT) {
-                    log::error!("{err}");
-                }
-            })?,
-    );
+    let socket = Arc::new(client.try_clone()?);
+    let completion = DisconnectOnDrop(socket.clone());
+    let thread = thread::Builder::new()
+        .name("backlight-client".into())
+        .spawn(move || {
+            let _completion = completion;
+            if let Err(err) = handle_client(client, &sender, CLIENT_IO_TIMEOUT) {
+                log::error!("{err:#}");
+            }
+        })?;
+    workers.push(ClientWorker { thread, socket });
     Ok(())
 }
 
@@ -168,6 +264,178 @@ mod tests {
     use super::*;
     use backlight_ipc::{BacklightInfo, BacklightMode};
 
+    // Run the server with fake devices in a separate process: signal masks and
+    // process-directed signals must never affect the cargo test runner.
+    #[test]
+    fn shutdown_subprocess() {
+        let Some(path) = env::var_os("BACKLIGHTD_SHUTDOWN_TEST") else {
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let gate_path = path.with_extension("gate");
+        let active_path = path.with_extension("active");
+        let complete_path = path.with_extension("complete");
+        let mode = env::var("BACKLIGHTD_SHUTDOWN_MODE").unwrap();
+        let result = run_server(&path, move |receiver, stopping| {
+            if mode == "error" {
+                return Err(anyhow!("fake controller failure"));
+            }
+            if mode == "panic" {
+                panic!("fake controller panic");
+            }
+            let gate = std::os::unix::net::UnixListener::bind(gate_path)?;
+            loop {
+                let request = receiver.recv_timeout(Duration::from_secs(10))?;
+                if stopping.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if mode == "active" {
+                    use std::io::Read;
+                    std::fs::write(&active_path, "active")?;
+                    let (mut release, _) = gate.accept()?;
+                    release.read_exact(&mut [0])?;
+                    std::fs::write(&complete_path, "complete")?;
+                }
+                let _ = request.reply.send(Ok(BacklightInfo {
+                    brightness_percent: 50,
+                    mode: BacklightMode::Manual,
+                }));
+            }
+        });
+        if env::var("BACKLIGHTD_SHUTDOWN_MODE").unwrap() == "error" {
+            assert!(format!("{:#}", result.unwrap_err()).contains("fake controller failure"));
+        } else if env::var("BACKLIGHTD_SHUTDOWN_MODE").unwrap() == "panic" {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Controller thread panicked"));
+        } else {
+            result.unwrap();
+        }
+    }
+
+    struct ShutdownChild {
+        child: std::process::Child,
+        directory: std::path::PathBuf,
+    }
+    impl Drop for ShutdownChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+    fn wait_for(mut condition: impl FnMut() -> bool) {
+        let limit = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < limit,
+                "subprocess did not reach expected state"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn shutdown_child(mode: &str) -> (ShutdownChild, std::path::PathBuf) {
+        use std::os::unix::process::CommandExt;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!(
+            "backlightd-shutdown-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let mut command = std::process::Command::new(env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::shutdown_subprocess", "--test-threads=1"])
+            .env("BACKLIGHTD_SHUTDOWN_TEST", &socket)
+            .env("BACKLIGHTD_SHUTDOWN_MODE", mode)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: Only async-signal-safe libc operations run before exec. Blocking
+        // here ensures even the test harness main thread inherits this signal mask.
+        unsafe {
+            command.pre_exec(|| {
+                let mut set = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                libc::sigaddset(&mut set, libc::SIGINT);
+                if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        (ShutdownChild { child, directory }, socket)
+    }
+
+    #[test]
+    fn termination_signals_clean_up_idle_and_active_servers() {
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            for mode in ["idle", "active"] {
+                let (mut server, path) = shutdown_child(mode);
+                wait_for(|| path.exists());
+                let mut client = UnixStream::connect(&path).unwrap();
+                if mode == "active" {
+                    BacklightCommand::SetBrightness(50)
+                        .serialize_into(&client)
+                        .unwrap();
+                    wait_for(|| path.with_extension("active").exists());
+                }
+                // SAFETY: Signal only our still-owned child process.
+                assert_eq!(unsafe { libc::kill(server.child.id() as _, signal) }, 0);
+                if mode == "active" {
+                    use std::io::{Read, Write};
+                    client
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    assert_eq!(client.read(&mut [0]).unwrap(), 0);
+                    assert!(server.child.try_wait().unwrap().is_none());
+                    assert!(
+                        path.exists(),
+                        "ownership released before device work finished"
+                    );
+                    UnixStream::connect(path.with_extension("gate"))
+                        .unwrap()
+                        .write_all(&[1])
+                        .unwrap();
+                }
+                let mut status = None;
+                wait_for(|| {
+                    status = server.child.try_wait().unwrap();
+                    status.is_some()
+                });
+                assert!(status.unwrap().success());
+                assert!(!path.exists());
+                assert!(
+                    socket::bind(&path).is_ok(),
+                    "socket ownership was not released"
+                );
+                if mode == "active" {
+                    assert!(path.with_extension("complete").exists());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn controller_failure_cleans_up_and_preserves_its_cause() {
+        for mode in ["error", "panic"] {
+            let (mut server, path) = shutdown_child(mode);
+            let mut status = None;
+            wait_for(|| {
+                status = server.child.try_wait().unwrap();
+                status.is_some()
+            });
+            assert!(status.unwrap().success());
+            assert!(!path.exists());
+            assert!(socket::bind(&path).is_ok());
+        }
+    }
+
     #[test]
     fn hotplug_notification_does_not_wait_for_controller_or_client_shutdown() {
         let (client, server) = UnixStream::pair().unwrap();
@@ -183,6 +451,23 @@ mod tests {
         // Keep both the reply and client open: the worker must finish independently.
         worker.join().unwrap();
         assert!(request.reply.send(Err(anyhow!("unused reply"))).is_err());
+    }
+
+    #[test]
+    fn completed_worker_closes_connection_while_its_handle_is_retained() {
+        use std::io::Read;
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (sender, _receiver) = wake::channel().unwrap();
+        let mut workers = Vec::new();
+        spawn_client(server, sender, &mut workers).unwrap();
+        BacklightCommand::NotifyShutdown
+            .serialize_into(&client)
+            .unwrap();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+        workers.pop().unwrap().join().unwrap();
     }
 
     #[test]
