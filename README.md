@@ -1,99 +1,48 @@
 # backlightd
 
-Control the brightness of your laptop screen and external monitors together, with
-one command. backlightd runs in the background, keeps monitor connections ready,
-and can gradually adjust brightness around sunrise and sunset.
+Control your laptop backlight and external monitors together, with one command.
+backlightd runs in the background and can gradually adjust brightness around
+sunrise and sunset. Use it for desktop keybindings, status bars, or automatic
+brightness; hotplugged monitors inherit the current target.
 
-Use it for desktop keybindings, status bars, or automatic brightness without
-managing each screen separately. Laptop screens use Linux's backlight interface;
-external monitors use DDC/CI. Hotplugged monitors inherit the current manual
-target or automatic brightness.
+Built for Linux with systemd and udev. Laptop screens use Linux's backlight
+interface; external monitors require DDC/CI support.
 
 ## Install
 
-Download the package matching your distribution and CPU from
-[GitHub Releases](https://github.com/ShellCode33/backlightd/releases). Packages
-include the daemon, CLI, service, hotplug rule, and commented configuration.
-See [installation instructions](https://github.com/ShellCode33/backlightd/wiki/Installation) for Debian/Ubuntu,
-Fedora, openSUSE, Arch Linux, and NixOS.
-
-Enable the service after installation:
-
-```sh
-sudo systemctl enable --now backlightd
-```
-
-Linux with systemd and udev is required. External monitors need DDC/CI enabled
-and accessible `/dev/i2c-*` devices; the `i2c-dev` kernel module may be needed.
-To build from source, install the latest stable Rust toolchain, a C toolchain,
-`pkg-config`, and libudev headers, then run `make`, `sudo make install`, and `sudo make activate`.
+Download a package for your distribution and CPU from
+[GitHub Releases](https://github.com/ShellCode33/backlightd/releases).
+See the [installation guide](https://github.com/ShellCode33/backlightd/wiki/Installation)
+for package commands, hardware requirements, and building from source, or the
+[NixOS guide](https://github.com/ShellCode33/backlightd/wiki/NixOS) for declarative setup.
 
 ## Use
 
 ```sh
-backlightctl                  # Show brightness and mode
-backlightctl -b 60%           # Set all screens to 60%
-backlightctl -b +5%           # Increase brightness by 5 percentage points
-backlightctl -b -5%           # Decrease brightness by 5 percentage points
-backlightctl --auto           # Resume automatic brightness
-backlightctl --json           # Machine-readable brightness and mode
-backlightctl --devices        # Monitor IDs, targets, and hardware readings
-backlightctl --devices --json # Detailed device data for scripts
-backlightctl --refresh        # Rediscover monitors and wait for completion
+backlightctl           # Show brightness and mode
+backlightctl -b 60%    # Set all screens to 60%
+backlightctl -b +5%    # Increase brightness by 5 percentage points
+backlightctl --auto    # Resume automatic brightness
+backlightctl --json    # Status for scripts and status bars
 ```
 
-A manual adjustment overrides auto mode for 12 hours, including time suspended.
-Automatic brightness defaults to 10–100% over four-hour ramps.
-Without a usable solar schedule, it uses morning and evening ramps starting at
-06:00 and 18:00 local time. There is no ambient-light sensor integration.
+A manual adjustment overrides automatic brightness for 12 hours by default,
+including time suspended. See the [CLI reference](https://github.com/ShellCode33/backlightd/wiki/CLI)
+for all commands and [integrations](https://github.com/ShellCode33/backlightd/wiki/Integrations)
+for shortcuts and Waybar setup.
 
-## Configuration
+## Configure
 
-Edit `/etc/backlightd/config.toml`; the installed file includes comments explaining
-each setting. Installation preserves an existing configuration.
+Settings live in `/etc/backlightd/config.toml`, with comments explaining each
+option. Configure automatic schedules, location, manual override duration, and
+per-monitor brightness ranges or curves. IP location lookup is opt-in.
 
-```sh
-backlightd --check-config
-sudo systemctl kill --signal=HUP backlightd
-```
+The [user wiki](https://github.com/ShellCode33/backlightd/wiki) covers
+[configuration and reloads](https://github.com/ShellCode33/backlightd/wiki/Configuration),
+[automatic brightness](https://github.com/ShellCode33/backlightd/wiki/Automatic-brightness),
+[calibration](https://github.com/ShellCode33/backlightd/wiki/Brightness-and-calibration),
+and [troubleshooting](https://github.com/ShellCode33/backlightd/wiki/Troubleshooting).
 
-Use `backlightd --config PATH --check-config` to validate another file. Invalid
-reloads preserve the running settings. The daemon uses defaults if the default
-file is absent; an explicitly supplied missing file is an error.
-
-Configure automatic limits and transition times, location, manual override
-duration (including `"forever"`), and logging in this file. IP location lookup
-is opt-in: choose `source = "ip"`, or provide manual coordinates. For troubleshooting, set `[logging] level = "debug"` and inspect
-`journalctl -u backlightd -b`.
-
-Legacy `BACKLIGHTD_LOCATION`, `BACKLIGHTD_ENABLE_LOCATION_API`, and
-`BACKLIGHTD_LOG_LEVEL` environment settings remain supported as overrides.
-Manual coordinates take precedence over the IP lookup setting. No systemd
-override is needed for new installations.
-
-Use `[brightness]` for a global hardware range or optional curve, and `[[devices]]`
-to override it per monitor or exclude a monitor from control. Copy the exact IDs
-from `backlightctl --devices`. Defaults use a linear scale; equal percentages
-are not a promise of equal perceived brightness on different screens.
-
-Detailed device status separates the last requested logical percentage, the
-percentage representable by the hardware, raw control values, and readback.
-Readback fields are empty after an unverified write; no fresh hardware read is
-performed for status requests. Discovery updates readings. Linux's optional
-`actual_brightness` reading is reported separately when available. The regular
-status percentage averages representable logical brightness across enabled devices.
-A low-resolution panel may not support every percentage step. Manual relative
-steps retain their intended target so repeated small adjustments can progress.
-
-Reloading calibration in manual mode preserves the current hardware setting;
-the next brightness command uses the new mapping. Auto mode reapplies its target.
-Screens with identical EDIDs share configuration IDs; devices without EDID use
-an identifier that can depend on their bus. Calibration cannot infer physical
-luminance or room lighting without measurement.
-
-## Documentation
-
-See the [user wiki](https://github.com/ShellCode33/backlightd/wiki) for the full CLI, configuration, calibration,
-and troubleshooting guide. Developer guides and the IPC API are available through
-`cargo doc --workspace --no-deps`. [Documentation maintenance](docs/README.md)
-explains local builds and later docs.rs/GitHub wiki publication.
+For developer guides and the IPC API, run `cargo doc --workspace --no-deps --open`.
+See [AGENTS.md](AGENTS.md) for contributor guidance and
+[packaging documentation](packaging/README.md) for the release workflow.
