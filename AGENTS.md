@@ -137,7 +137,11 @@ version without discussion.
 
 ## Documentation
 
-The user manual is `docs/wiki/` (GitHub wiki page links and `_Sidebar.md`).
+The user manual lives in the separate GitHub wiki repository:
+`git@github.com:ShellCode33/backlightd.wiki.git`, published at
+https://github.com/ShellCode33/backlightd/wiki. Clone it separately to edit usage
+pages; keep `Home.md`, `_Sidebar.md`, and wiki page links consistent. User manual
+Markdown is no longer stored or installed from this repository.
 Code-focused guides live under `backlightd/src/docs/` and are included by the
 lightweight `backlightd/src/lib.rs` documentation target; runtime internals remain
 in the executable. Document public wire types in `backlight_ipc/src/lib.rs`.

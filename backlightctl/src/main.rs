@@ -2,7 +2,7 @@
 //!
 //! Mutations are followed by a status request on the same connection. Device
 //! enumeration fetches one indexed record per bounded response; normal JSON status
-//! retains its two-field shape. See `docs/wiki/CLI.md` for the user reference.
+//! retains its two-field shape. See the [CLI reference](https://github.com/ShellCode33/backlightd/wiki/CLI).
 
 use std::{io::BufReader, os::unix::net::UnixStream, path::PathBuf, process::exit};
 

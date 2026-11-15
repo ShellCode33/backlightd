@@ -1,8 +1,9 @@
 # Packaging and releases
 
 One native package contains both `backlightd` and `backlightctl`, a commented
-configuration, systemd unit, udev rule, and user documentation. See the
-[installation guide](../docs/wiki/Installation.md) for supported distributions,
+configuration, systemd unit, udev rule, README, and license. The user manual lives
+in the separate GitHub wiki. See the
+[installation guide](https://github.com/ShellCode33/backlightd/wiki/Installation) for supported distributions,
 architectures, and commands. Target only the latest stable release of each
 distribution; update the explicit container versions when new releases arrive.
 Arch follows its rolling release, and Nix pins the latest stable NixOS channel.

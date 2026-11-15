@@ -8,7 +8,8 @@
 - `backlight_ipc`: shared wire types and bounded serialization, re-exported as
   [`crate::ipc`].
 - `etc/`: installed configuration tree mirrored in the repository.
-- `docs/wiki/`: user manual pages intended for a GitHub wiki.
+- [GitHub wiki](https://github.com/ShellCode33/backlightd/wiki): user manual,
+  maintained in the separate `backlightd.wiki.git` repository.
 
 Executable source files are `main.rs`, `controller.rs`, `monitors.rs`, `sysfs.rs`,
 `ddc.rs`, `calibration.rs`, `config.rs`, `auto.rs`, `location.rs`, `socket.rs`,

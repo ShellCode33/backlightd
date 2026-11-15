@@ -24,8 +24,6 @@ install:
 	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' "$(DESTDIR)$(UDEV_RULES_DIR)/95-backlightd.rules"
 	install -Dm 644 README.md "$(DESTDIR)$(DOC_DIR)/README.md"
 	install -Dm 644 LICENSE "$(DESTDIR)$(DOC_DIR)/LICENSE"
-	install -d -m 755 "$(DESTDIR)$(DOC_DIR)/wiki"
-	install -m 644 docs/wiki/*.md "$(DESTDIR)$(DOC_DIR)/wiki/"
 
 # Explicit opt-in for a local source installation, never used by package builders.
 .PHONY: activate

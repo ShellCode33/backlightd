@@ -14,7 +14,7 @@ target or automatic brightness.
 Download the package matching your distribution and CPU from
 [GitHub Releases](https://github.com/ShellCode33/backlightd/releases). Packages
 include the daemon, CLI, service, hotplug rule, and commented configuration.
-See [installation instructions](docs/wiki/Installation.md) for Debian/Ubuntu,
+See [installation instructions](https://github.com/ShellCode33/backlightd/wiki/Installation) for Debian/Ubuntu,
 Fedora, openSUSE, Arch Linux, and NixOS.
 
 Enable the service after installation:
@@ -93,7 +93,7 @@ luminance or room lighting without measurement.
 
 ## Documentation
 
-See the [user wiki](docs/wiki/Home.md) for the full CLI, configuration, calibration,
+See the [user wiki](https://github.com/ShellCode33/backlightd/wiki) for the full CLI, configuration, calibration,
 and troubleshooting guide. Developer guides and the IPC API are available through
 `cargo doc --workspace --no-deps`. [Documentation maintenance](docs/README.md)
 explains local builds and later docs.rs/GitHub wiki publication.

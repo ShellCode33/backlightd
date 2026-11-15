@@ -17,8 +17,8 @@ is accessed by importing this library or building these docs.
 - [`development`]: source navigation and regression-test strategy.
 - [`ipc`]: public protocol types and serialization methods for client authors.
 
-The user-facing manual is maintained separately under `docs/wiki/` in the source
-repository. It covers installation, CLI commands, configuration examples, and
+The user-facing manual is maintained in the separate
+[GitHub wiki](https://github.com/ShellCode33/backlightd/wiki). It covers installation, CLI commands, configuration examples, and
 troubleshooting.
 
 ## A command without hardware I/O
