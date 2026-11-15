@@ -1,13 +1,14 @@
-name: Release packages
+name: Packages
 
 on:
   push:
-    tags: ["v*"]
+    branches: ["**"]
+    tags: ["**"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build and publish (e.g. v0.1.0)
-        required: true
+        description: Existing version tag to publish; leave empty to test packaging only
+        required: false
         type: string
 
 permissions:
@@ -19,9 +20,11 @@ concurrency:
 
 jobs:
   quality:
+    # Branch pushes already run these checks in the CI workflow.
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     uses: ./.github/workflows/build.yml
     with:
-      ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+      ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
 
   source:
     runs-on: ubuntu-24.04
@@ -33,12 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
           persist-credentials: false
-      - name: Validate tag and create source archive
+      - name: Validate versions and create source archive
         id: source
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
         run: |
           # On manual dispatch GITHUB_SHA describes the workflow branch, not the tag.
           export GITHUB_SHA=$(git rev-parse HEAD)
@@ -131,13 +134,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
           persist-credentials: false
       - uses: cachix/install-nix-action@v31
       - name: Build package and check NixOS module
         run: nix flake check --no-update-lock-file --print-build-logs
 
   publish:
+    # Packaging runs on every push; only version tags or explicit tagged dispatches publish.
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     needs: [quality, source, native, nix]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -152,7 +157,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
           VERSION: ${{ needs.source.outputs.version }}
           PRERELEASE: ${{ needs.source.outputs.prerelease }}
         run: |

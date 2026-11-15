@@ -15,13 +15,19 @@ repository packages. There is no automatic update repository or signing key yet.
 1. Set the same version in all three workspace member `Cargo.toml` files and
    refresh `Cargo.lock`. Use the latest stable Rust toolchain.
 2. Commit and push the reviewed changes. Push a matching tag, e.g. `v0.1.0`.
-3. The `Release packages` workflow runs the existing tests/linters, builds native
+3. On a version tag, the `Packages` workflow runs the existing tests/linters, builds native
    packages, and checks the Nix package/module. Every native package is installed,
    checked, reinstalled after a local config edit, and removed in its container.
 4. Only after every job passes does CI create a draft, upload all assets and
    `SHA256SUMS`, and publish it. A `-rc.1` style version becomes a prerelease.
 
-The workflow can also be dispatched with an **existing** tag. It validates the
+Every branch or tag push runs the complete native packaging matrix and Nix
+checks. Branches and non-version tags only upload workflow artifacts; they never
+publish a GitHub release. Branch quality checks run separately in the CI workflow.
+
+Dispatch the `Packages` workflow with the tag field empty to test the selected
+commit without publishing. The workflow can also be dispatched with an **existing**
+version tag to publish. It validates the
 tag against the checked-out Cargo versions and checks/builds that tag's code.
 Published releases are never overwritten. A failed upload can be retried against
 the remaining draft. Download build artifacts from the workflow while diagnosing

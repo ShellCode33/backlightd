@@ -1,7 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 out=${1:-dist}
-version=$(python3 packaging/version.py "${RELEASE_TAG:?set the release tag, e.g. v0.1.0}")
+# Branch builds validate workspace versions without requiring a release tag.
+if [[ -n ${RELEASE_TAG:-} ]]; then
+    version=$(python3 packaging/version.py "$RELEASE_TAG")
+else
+    version=$(python3 packaging/version.py)
+fi
 mkdir -p "$out"
 git archive --format=tar --prefix="backlightd-$version/" "${GITHUB_SHA:-HEAD}" | gzip -n > "$out/backlightd-$version.tar.gz"
 if [[ -n ${GITHUB_OUTPUT:-} ]]; then

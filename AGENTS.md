@@ -179,9 +179,10 @@ validation. Native packages use vendor unit/rule directories under `/usr/lib`.
 
 `packaging/` contains native recipes, lifecycle scripts, and container build/check
 helpers. `packaging/test.sh` checks staged installation without host side effects.
-The release workflow builds Debian/Ubuntu, RPM, and Arch packages in native distro
-containers on matching CPU runners, and checks the Nix flake/module. Releases are
-published only after all jobs succeed. Keep all three Cargo package versions in
+The packaging workflow tests Debian/Ubuntu, RPM, and Arch packages on every push
+in native distro containers on matching CPU runners, and checks the Nix
+flake/module. Branch pushes only upload workflow artifacts. Version tags or an
+explicit tagged manual dispatch publish releases after all required jobs succeed. Keep all three Cargo package versions in
 sync; version tags must match `vX.Y.Z`. See `packaging/README.md`. Do not push tags,
 publish releases, or modify distribution repositories without authorization.
 
