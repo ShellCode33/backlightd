@@ -1,55 +1,106 @@
-name: "CI"
+name: CI
+
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
-  build:
-    name: cargo build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get -y install libudev-dev
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo build --release
   formatting:
-    name: cargo fmt
+    name: Formatting
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get -y install libudev-dev
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: stable
           components: rustfmt
-      - name: Rustfmt Check
-        uses: actions-rust-lang/rustfmt@v1
+          cache: false
+      - run: cargo fmt --all -- --check
+
   clippy:
-    name: cargo clippy
+    name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get -y install libudev-dev
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          sudo apt-get install --yes --no-install-recommends libudev-dev pkg-config
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: stable
           components: clippy
-      - run: cargo clippy
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
   tests:
-    name: cargo test
+    name: Tests (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.86.0", stable]
     steps:
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get -y install libudev-dev
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo test
+          sudo apt-get install --yes --no-install-recommends libudev-dev pkg-config tzdata
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: Unit tests and documentation examples
+        run: cargo test --workspace --locked
+      - name: Schedule regressions across time zones
+        if: matrix.toolchain == 'stable'
+        run: |
+          for zone in America/New_York Europe/Berlin Pacific/Apia Pacific/Kiritimati; do
+            echo "Testing schedules in $zone"
+            TZ="$zone" cargo test -p backlightd --bin backlightd --locked auto::tests -- --test-threads=1
+          done
+
+  documentation:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libudev-dev pkg-config
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+      - run: cargo doc --workspace --no-deps --locked
+
+  build:
+    name: Release build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libudev-dev pkg-config
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+      - run: cargo build --workspace --release --locked
