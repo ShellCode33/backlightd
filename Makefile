@@ -1,32 +1,39 @@
-INSTALL_PREFIX ?= /usr/local/bin
+PREFIX ?= /usr/local
+INSTALL_PREFIX ?= $(PREFIX)/bin
 CONFIG_DIR ?= /etc/backlightd
+SYSTEMD_UNIT_DIR ?= /etc/systemd/system
+UDEV_RULES_DIR ?= /etc/udev/rules.d
+DOC_DIR ?= $(PREFIX)/share/doc/backlightd
+BUILD_DIR ?= target/release
+DESTDIR ?=
 
 .PHONY: all
-all: target/release/backlightd target/release/backlightctl
+all:
+	cargo build --workspace --release --locked
 
-target/release/backlightd: backlightd/Cargo.toml $(shell ls -1 backlightd/src/*.rs)
-	cargo test --frozen --bin backlightd
-	cargo build --frozen --release --bin backlightd
-
-target/release/backlightctl: backlightctl/Cargo.toml $(shell ls -1 backlightctl/src/*.rs)
-	cargo test --frozen --bin backlightctl
-	cargo build --frozen --release --bin backlightctl
-
+# Copy files only: safe for package builders and never operates on host services.
 .PHONY: install
 install:
-	install -d -m 755 $(CONFIG_DIR)
-	test -e $(CONFIG_DIR)/config.toml || install -m 644 etc/backlightd/config.toml $(CONFIG_DIR)/config.toml
-	install -Dm 755 -t $(INSTALL_PREFIX) target/release/backlightd
-	install -Dm 755 -t $(INSTALL_PREFIX) target/release/backlightctl
-	install -Dm 644 -t /etc/systemd/system etc/systemd/system/backlightd.service
-	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' /etc/systemd/system/backlightd.service
-	install -Dm 644 -t /etc/udev/rules.d etc/udev/rules.d/95-backlightd.rules
-	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' /etc/udev/rules.d/95-backlightd.rules
+	install -d -m 755 "$(DESTDIR)$(CONFIG_DIR)"
+	test -e "$(DESTDIR)$(CONFIG_DIR)/config.toml" || install -m 644 etc/backlightd/config.toml "$(DESTDIR)$(CONFIG_DIR)/config.toml"
+	install -Dm 755 "$(BUILD_DIR)/backlightd" "$(DESTDIR)$(INSTALL_PREFIX)/backlightd"
+	install -Dm 755 "$(BUILD_DIR)/backlightctl" "$(DESTDIR)$(INSTALL_PREFIX)/backlightctl"
+	install -Dm 644 etc/systemd/system/backlightd.service "$(DESTDIR)$(SYSTEMD_UNIT_DIR)/backlightd.service"
+	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' "$(DESTDIR)$(SYSTEMD_UNIT_DIR)/backlightd.service"
+	install -Dm 644 etc/udev/rules.d/95-backlightd.rules "$(DESTDIR)$(UDEV_RULES_DIR)/95-backlightd.rules"
+	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' "$(DESTDIR)$(UDEV_RULES_DIR)/95-backlightd.rules"
+	install -Dm 644 README.md "$(DESTDIR)$(DOC_DIR)/README.md"
+	install -Dm 644 LICENSE "$(DESTDIR)$(DOC_DIR)/LICENSE"
+	install -d -m 755 "$(DESTDIR)$(DOC_DIR)/wiki"
+	install -m 644 docs/wiki/*.md "$(DESTDIR)$(DOC_DIR)/wiki/"
+
+# Explicit opt-in for a local source installation, never used by package builders.
+.PHONY: activate
+activate:
 	udevadm control --reload-rules
 	systemctl daemon-reload
-	systemctl enable backlightd
-	systemctl restart backlightd
+	systemctl enable --now backlightd
 
 .PHONY: clean
 clean:
-	rm -rf target/release
+	cargo clean --release

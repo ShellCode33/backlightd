@@ -2,6 +2,7 @@
 
 - [[Home]]
 - [[Installation]]
+- [[NixOS]]
 - [[CLI]]
 - [[Configuration]]
 - [[Automatic-brightness]]

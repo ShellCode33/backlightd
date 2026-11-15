@@ -165,8 +165,18 @@ For documentation-only changes, check accuracy and the diff; no full test run is
 needed. Solar/time changes warrant checks in multiple time zones.
 
 Validate packaging changes with staged files or dry runs rather than installing
-into the host. `make install` writes system files, reloads udev and systemd, enables
-the service, and restarts it. It expects release binaries to exist already.
+into the host. `make install DESTDIR=...` only copies files, preserves an existing
+configuration, and expects release binaries to exist already. `make activate`
+explicitly reloads integrations and enables/starts the service; never run it as
+validation. Native packages use vendor unit/rule directories under `/usr/lib`.
+
+`packaging/` contains native recipes, lifecycle scripts, and container build/check
+helpers. `packaging/test.sh` checks staged installation without host side effects.
+The release workflow builds Debian/Ubuntu, RPM, and Arch packages in native distro
+containers on matching CPU runners, and checks the Nix flake/module. Releases are
+published only after all jobs succeed. Keep all three Cargo package versions in
+sync; version tags must match `vX.Y.Z`. See `packaging/README.md`. Do not push tags,
+publish releases, or modify distribution repositories without authorization.
 
 Debug logging uses `BACKLIGHTD_LOG_LEVEL=backlightd=debug`; inspect system logs
 with `journalctl -u backlightd`, not the user service journal. Discovery timings

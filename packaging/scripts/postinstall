@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+# Do not enable/start a new service. Preserve an existing active service on upgrade.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl try-restart backlightd.service || true
+fi
+if [ -S /run/udev/control ] && command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+fi

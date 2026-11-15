@@ -11,21 +11,22 @@ target or automatic brightness.
 
 ## Install
 
-You need Linux with systemd and udev, Rust 1.86 or newer, a C build toolchain,
-`pkg-config`, and the libudev development package (`libudev-dev` on Debian/Ubuntu).
-External monitors must support DDC/CI, have it enabled in their on-screen settings,
-and expose an accessible `/dev/i2c-*` device; you may need the `i2c-dev` kernel module.
+Download the package matching your distribution and CPU from
+[GitHub Releases](https://github.com/ShellCode33/backlightd/releases). Packages
+include the daemon, CLI, service, hotplug rule, and commented configuration.
+See [installation instructions](docs/wiki/Installation.md) for Debian/Ubuntu,
+Fedora, openSUSE, Arch Linux, and NixOS.
 
-From the source directory:
+Enable the service after installation:
 
 ```sh
-cargo build --workspace --release --locked
-sudo make install
+sudo systemctl enable --now backlightd
 ```
 
-Installation installs both commands, the system service, and the hotplug rule,
-then enables and starts the daemon. Binaries default to `/usr/local/bin`; override
-this with `sudo make install INSTALL_PREFIX=/your/bin`.
+Linux with systemd and udev is required. External monitors need DDC/CI enabled
+and accessible `/dev/i2c-*` devices; the `i2c-dev` kernel module may be needed.
+To build from source, install Rust 1.86+, a C toolchain, `pkg-config`, and libudev
+headers, then run `make`, `sudo make install`, and `sudo make activate`.
 
 ## Use
 

@@ -1,0 +1,172 @@
+name: Release packages
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and publish (e.g. v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-assets-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+      msrv: ${{ steps.source.outputs.msrv }}
+      epoch: ${{ steps.source.outputs.epoch }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+          persist-credentials: false
+      - name: Validate tag and create source archive
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # On manual dispatch GITHUB_SHA describes the workflow branch, not the tag.
+          export GITHUB_SHA=$(git rev-parse HEAD)
+          packaging/source.sh dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-source
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  native:
+    needs: source
+    name: ${{ matrix.target }} (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        target: [debian13, ubuntu2610, fedora45, opensuseleap161, archlinux]
+        exclude:
+          - target: archlinux
+            runner: ubuntu-24.04-arm
+        include:
+          - target: debian13
+            image: debian:13-slim
+            bootstrap: deb
+            format: deb
+          - target: ubuntu2610
+            image: ubuntu:26.10
+            bootstrap: deb
+            format: deb
+          - target: fedora45
+            image: registry.fedoraproject.org/fedora:45
+            bootstrap: rpm
+            format: rpm
+          - target: opensuseleap161
+            image: registry.opensuse.org/opensuse/leap:16.1
+            bootstrap: suse
+            format: rpm
+          - target: archlinux
+            image: archlinux:base-devel
+            bootstrap: arch
+            format: arch
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-source
+          path: source-release
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ needs.source.outputs.msrv }}
+          cache: false
+      - name: Build, install, reinstall, and remove in target distribution
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.source.outputs.epoch }}
+          BUILD_FLAVOR: ${{ matrix.target }}
+          IMAGE: ${{ matrix.image }}
+          BOOTSTRAP: ${{ matrix.bootstrap }}
+          FORMAT: ${{ matrix.format }}
+        run: |
+          mkdir -p packages
+          toolchain=$(rustc --print sysroot)
+          docker run --rm \
+            -e VERSION -e SOURCE_DATE_EPOCH -e BUILD_FLAVOR -e BOOTSTRAP -e FORMAT \
+            -v "$PWD/source-release:/release:ro" -v "$PWD/packages:/output" \
+            -v "$toolchain:/opt/rust:ro" "$IMAGE" sh -eu -c '
+              mkdir -p /build/source
+              tar -xzf "/release/backlightd-$VERSION.tar.gz" --strip-components=1 -C /build/source
+              cd /build/source
+              bash packaging/container-build.sh "$BOOTSTRAP" "$FORMAT" "/release/backlightd-$VERSION.tar.gz"
+            '
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.target }}-${{ matrix.runner }}
+          path: packages/*
+          if-no-files-found: error
+          compression-level: 0
+
+  nix:
+    needs: source
+    name: Nix (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tag || github.ref_name) }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Build package and check NixOS module
+        run: nix flake check --no-update-lock-file --print-build-logs
+
+  publish:
+    needs: [quality, source, native, nix]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish complete release with checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ needs.source.outputs.version }}
+          PRERELEASE: ${{ needs.source.outputs.prerelease }}
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > /tmp/release-is-draft 2>/dev/null; then
+            test "$(cat /tmp/release-is-draft)" = true || {
+              echo 'Refusing to replace an already published release.' >&2
+              exit 1
+            }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "backlightd $VERSION" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" ./* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE"

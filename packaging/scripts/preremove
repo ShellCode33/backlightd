@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+# Debian passes "remove", RPM passes 0 on uninstall and 1 during upgrade.
+case "${1:-remove}" in
+    remove|0)
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl --no-reload disable --now backlightd.service || true
+        fi
+        ;;
+esac

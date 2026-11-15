@@ -1,0 +1,32 @@
+pkgname=backlightd
+pkgver=@ARCH_VERSION@
+pkgrel=1
+pkgdesc='Coordinated laptop and external monitor brightness'
+arch=('x86_64')
+url='https://github.com/ShellCode33/backlightd'
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'systemd')
+makedepends=('cargo' 'pkgconf')
+backup=('etc/backlightd/config.toml')
+install=backlightd.install
+source=("backlightd-@VERSION@.tar.gz::https://github.com/ShellCode33/backlightd/releases/download/v@VERSION@/backlightd-@VERSION@.tar.gz")
+sha256sums=('@SOURCE_SHA256@')
+options=('!lto' '!debug')
+
+build() {
+    cd "$srcdir/backlightd-@VERSION@"
+    cargo build --workspace --release --locked
+}
+
+check() {
+    cd "$srcdir/backlightd-@VERSION@"
+    cargo test --workspace --locked
+}
+
+package() {
+    cd "$srcdir/backlightd-@VERSION@"
+    make install DESTDIR="$pkgdir" PREFIX=/usr INSTALL_PREFIX=/usr/bin \
+        CONFIG_DIR=/etc/backlightd SYSTEMD_UNIT_DIR=/usr/lib/systemd/system \
+        UDEV_RULES_DIR=/usr/lib/udev/rules.d DOC_DIR=/usr/share/doc/backlightd
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/backlightd/LICENSE"
+}

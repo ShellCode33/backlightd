@@ -1,0 +1,11 @@
+Package: backlightd
+Version: @DEB_VERSION@
+Section: utils
+Priority: optional
+Architecture: @DEB_ARCH@
+Maintainer: ShellCode33 <shellcode33@proton.me>
+Depends: @SHLIB_DEPENDS@, systemd, udev
+Homepage: https://github.com/ShellCode33/backlightd
+Description: Coordinated laptop and external monitor brightness
+ A Linux daemon and CLI for sysfs backlights and DDC/CI monitors,
+ with configurable automatic schedules and per-monitor calibration.

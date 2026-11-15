@@ -1,0 +1,47 @@
+Name:           backlightd
+Version:        @RPM_VERSION@
+Release:        1%{?dist}
+Summary:        Coordinated laptop and external monitor brightness
+License:        MIT
+URL:            https://github.com/ShellCode33/backlightd
+Source0:        backlightd-@VERSION@.tar.gz
+BuildRequires:  gcc, make, pkgconfig(libudev)
+Requires:       systemd, @UDEV_REQUIRES@
+%global debug_package %{nil}
+
+%description
+A Linux daemon and CLI for sysfs backlights and DDC/CI monitors, with
+configurable automatic schedules and per-monitor calibration.
+
+%prep
+%setup -q -n backlightd-@VERSION@
+
+%build
+cargo build --workspace --release --locked
+
+%check
+cargo test --workspace --locked
+
+%install
+make install DESTDIR=%{buildroot} PREFIX=%{_prefix} INSTALL_PREFIX=%{_bindir} \
+    SYSTEMD_UNIT_DIR=%{_unitdir} UDEV_RULES_DIR=%{_prefix}/lib/udev/rules.d \
+    CONFIG_DIR=%{_sysconfdir}/backlightd DOC_DIR=%{_datadir}/doc/backlightd
+
+%post
+@POSTINSTALL@
+
+%preun
+@PREREMOVE@
+
+%postun
+@POSTREMOVE@
+
+%files
+%{_bindir}/backlightd
+%{_bindir}/backlightctl
+%{_unitdir}/backlightd.service
+%{_prefix}/lib/udev/rules.d/95-backlightd.rules
+%dir %{_sysconfdir}/backlightd
+%config(noreplace) %{_sysconfdir}/backlightd/config.toml
+%doc %{_datadir}/doc/backlightd
+%license LICENSE

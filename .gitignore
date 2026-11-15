@@ -1,1 +1,6 @@
 /target
+
+/dist
+/result
+/result-*
+__pycache__/

@@ -4,6 +4,7 @@ backlightd controls laptop backlights and external DDC/CI monitors together. Use
 one CLI for desktop shortcuts, a status bar, and gradual automatic brightness.
 
 - [[Installation]] — requirements, build, installation, and service commands.
+- [[NixOS]] — Nix package and declarative system setup.
 - [[CLI]] — brightness, power, JSON, refresh, and device listing.
 - [[Configuration]] — every setting, validation, reload, and legacy overrides.
 - [[Automatic-brightness]] — solar schedules, clock fallback, manual overrides.

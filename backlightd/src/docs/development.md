@@ -45,9 +45,11 @@ Schedule tests should also run under different `TZ` values, including
 exercise DST, skipped dates, overnight transitions, and extreme offsets.
 
 Never start the real daemon or mutate live displays merely to build documentation
-or run ordinary tests. Installation writes system files and restarts the service;
-use staged files and dry runs for packaging checks. Hardware verification requires
-a separately coordinated user session.
+or run ordinary tests. `make install DESTDIR=...` stages files without touching
+services; `make activate` explicitly enables/starts the real daemon. Use
+`packaging/test.sh` for installation checks. Native package tests run in disposable
+distribution containers. Hardware verification requires a separately coordinated
+user session.
 
 ## Documentation targets
 
