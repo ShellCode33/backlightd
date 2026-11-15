@@ -320,7 +320,7 @@ mod tests {
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
-        Config::parse(include_str!("../../backlightd.toml")).unwrap();
+        Config::parse(include_str!("../../etc/backlightd/config.toml")).unwrap();
     }
 
     #[test]

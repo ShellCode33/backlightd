@@ -43,8 +43,9 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
   and suspend-aware deadline waits via libc timerfd/poll.
 - `backlightctl/src/main.rs`: CLI and IPC client.
 - `backlight_ipc/src/lib.rs`: shared commands, responses, and wire format.
-- `Makefile`, `backlightd.service`, `95-backlightd.rules`: installation and runtime
-  integration. `$INSTALL_PREFIX` is substituted into the service and rule.
+- `Makefile` and the mirrored `etc/` tree: installation and runtime integration.
+  `etc/backlightd/config.toml` is the commented configuration; service and udev
+  files live under `etc/systemd/system/` and `etc/udev/rules.d/`. `$INSTALL_PREFIX` is substituted into the service and rule.
 
 ## Behavior to preserve
 

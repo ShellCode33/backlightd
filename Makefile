@@ -15,12 +15,12 @@ target/release/backlightctl: backlightctl/Cargo.toml $(shell ls -1 backlightctl/
 .PHONY: install
 install:
 	install -d -m 755 $(CONFIG_DIR)
-	test -e $(CONFIG_DIR)/config.toml || install -m 644 backlightd.toml $(CONFIG_DIR)/config.toml
+	test -e $(CONFIG_DIR)/config.toml || install -m 644 etc/backlightd/config.toml $(CONFIG_DIR)/config.toml
 	install -Dm 755 -t $(INSTALL_PREFIX) target/release/backlightd
 	install -Dm 755 -t $(INSTALL_PREFIX) target/release/backlightctl
-	install -Dm 644 -t /etc/systemd/system backlightd.service
+	install -Dm 644 -t /etc/systemd/system etc/systemd/system/backlightd.service
 	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' /etc/systemd/system/backlightd.service
-	install -Dm 644 -t /etc/udev/rules.d 95-backlightd.rules
+	install -Dm 644 -t /etc/udev/rules.d etc/udev/rules.d/95-backlightd.rules
 	sed -i 's+$$INSTALL_PREFIX+$(INSTALL_PREFIX)+g' /etc/udev/rules.d/95-backlightd.rules
 	udevadm control --reload-rules
 	systemctl daemon-reload
