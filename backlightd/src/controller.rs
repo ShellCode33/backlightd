@@ -1,6 +1,6 @@
 //! Serialized commands, mode/override state, configuration application, and deadlines.
 //!
-//! Discovery intentionally blocks following commands. Boottime deadlines include
+//! EDID enumeration runs in a worker; VCP operations remain serialized. Boottime deadlines include
 //! suspend; manual intent is recorded before hardware I/O and survives recovery.
 
 use std::{sync::mpsc::Sender, time::Duration};
@@ -27,6 +27,18 @@ trait Devices {
     fn configure(&mut self, _config: std::sync::Arc<crate::config::Config>) {}
     fn execute(&mut self, command: BacklightCommand) -> anyhow::Result<()>;
     fn refresh(&mut self, reason: &str) -> anyhow::Result<()>;
+    fn start_refresh(&mut self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    fn refresh_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+    fn refresh_ready(&self) -> bool {
+        false
+    }
+    fn finish_refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+        self.refresh(reason)
+    }
     fn set_manual_target(&mut self, target: Option<u8>);
     fn brightness(&self) -> u8;
     fn target_brightness(&self) -> u8 {
@@ -38,8 +50,34 @@ trait Devices {
     fn automatic(&mut self) -> anyhow::Result<(u8, Duration)>;
 }
 
-struct Monitors;
+#[derive(Default)]
+struct Monitors {
+    enumeration: Option<crate::discovery::Enumeration<Vec<ddc_hi::Display>>>,
+}
 impl Devices for Monitors {
+    fn start_refresh(&mut self) -> anyhow::Result<bool> {
+        self.enumeration = Some(crate::discovery::Enumeration::spawn(
+            monitors::enumerate_displays,
+        )?);
+        Ok(true)
+    }
+    fn refresh_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.enumeration.as_ref().map(|worker| worker.fd())
+    }
+    fn refresh_ready(&self) -> bool {
+        self.enumeration
+            .as_ref()
+            .is_some_and(|worker| worker.ready())
+    }
+    fn finish_refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+        let displays = self
+            .enumeration
+            .take()
+            .expect("active enumeration")
+            .finish()?;
+        monitors::refresh_with_displays(reason, displays)
+    }
+
     fn device_info(&self, index: usize) -> Option<backlight_ipc::DeviceInfo> {
         monitors::device_info(index)
     }
@@ -82,12 +120,15 @@ struct Controller<D> {
     refresh_deadline: Instant,
     pending_refresh: Option<PendingRefresh>,
     last_refresh_started: Option<Instant>,
+    last_refresh_completed_started: Option<Instant>,
     last_refresh_error: Option<String>,
     last_awake_sample: std::time::Instant,
     last_boot_sample: Instant,
     config: std::sync::Arc<crate::config::Config>,
     manual_started: Option<Instant>,
     manual_forever: bool,
+    active_refresh: Option<(&'static str, std::time::Instant)>,
+    resume_pending: bool,
 }
 
 impl<D: Devices> Controller<D> {
@@ -101,12 +142,15 @@ impl<D: Devices> Controller<D> {
             refresh_deadline: Instant::now() + REFRESH_INTERVAL,
             pending_refresh: None,
             last_refresh_started: None,
+            last_refresh_completed_started: None,
             last_refresh_error: None,
             last_awake_sample,
             last_boot_sample,
             config: crate::config::current(),
             manual_started: None,
             manual_forever: false,
+            active_refresh: None,
+            resume_pending: false,
         }
     }
 
@@ -151,15 +195,16 @@ impl<D: Devices> Controller<D> {
         self.adjust()
     }
 
-    fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
-        let started = std::time::Instant::now();
-        self.last_refresh_started = Some(Instant::now());
-        self.pending_refresh = None;
-        let result = self.devices.refresh(reason);
+    fn complete_refresh(
+        &mut self,
+        reason: &str,
+        started: std::time::Instant,
+        result: anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        self.last_refresh_completed_started = self.last_refresh_started;
         let discovery_elapsed = started.elapsed();
         self.refresh_deadline = Instant::now() + REFRESH_INTERVAL;
         let adjustment_started = std::time::Instant::now();
-        // Valid monitors still receive the auto target after a partial scan.
         let adjustment = if self.mode == BacklightMode::Auto {
             self.adjust()
         } else {
@@ -169,6 +214,46 @@ impl<D: Devices> Controller<D> {
         self.last_refresh_error = result.as_ref().err().map(ToString::to_string);
         log::debug!("Refresh finished: reason={reason} mode={} success={} discovery_ms={} adjustment_ms={} total_ms={}", self.mode, result.is_ok(), discovery_elapsed.as_millis(), adjustment_started.elapsed().as_millis(), started.elapsed().as_millis());
         result
+    }
+
+    fn finish_background_refresh(&mut self) -> anyhow::Result<()> {
+        let (reason, started) = self.active_refresh.take().expect("active refresh");
+        // Read brightness now, on the controller, rather than merging an old worker
+        // snapshot over commands or configuration changes received during enumeration.
+        let result = self.devices.finish_refresh(reason);
+        self.complete_refresh(reason, started, result)
+    }
+
+    fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+        if self.active_refresh.is_some() {
+            if let Err(err) = self.finish_background_refresh() {
+                log::error!("Background refresh failed: {err}");
+            }
+        }
+        let started = std::time::Instant::now();
+        self.last_refresh_started = Some(Instant::now());
+        self.pending_refresh = None;
+        let result = self.devices.refresh(reason);
+        self.complete_refresh(reason, started, result)
+    }
+
+    fn start_background_refresh(&mut self, reason: &'static str) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        self.last_refresh_started = Some(Instant::now());
+        self.pending_refresh = None;
+        self.resume_pending = false;
+        log::debug!("Background enumeration started: reason={reason}");
+        match self.devices.start_refresh() {
+            Ok(true) => {
+                self.active_refresh = Some((reason, started));
+                Ok(())
+            }
+            Ok(false) => {
+                let result = self.devices.refresh(reason);
+                self.complete_refresh(reason, started, result)
+            }
+            Err(err) => self.complete_refresh(reason, started, Err(err)),
+        }
     }
 
     fn service_deadlines(&mut self) {
@@ -185,6 +270,7 @@ impl<D: Devices> Controller<D> {
     }
 
     fn service_deadlines_after_resume(&mut self, resumed: bool) {
+        self.resume_pending |= resumed;
         if !self.manual_forever
             && Instant::now() >= self.deadline
             && self.mode == BacklightMode::Manual
@@ -192,19 +278,26 @@ impl<D: Devices> Controller<D> {
             self.mode = BacklightMode::Auto;
             self.devices.set_manual_target(None);
         }
+        if self.active_refresh.is_some() && self.devices.refresh_ready() {
+            if let Err(err) = self.finish_background_refresh() {
+                log::error!("Background refresh failed: {err}");
+            }
+        }
         let hotplug_due = self
             .pending_refresh
             .as_ref()
             .is_some_and(|pending| Instant::now() >= pending.deadline);
-        if resumed || Instant::now() >= self.refresh_deadline || hotplug_due {
-            let reason = if resumed {
+        if self.active_refresh.is_none()
+            && (self.resume_pending || Instant::now() >= self.refresh_deadline || hotplug_due)
+        {
+            let reason = if self.resume_pending {
                 "resume"
             } else if hotplug_due {
                 "hotplug"
             } else {
                 "scheduled"
             };
-            if let Err(err) = self.refresh(reason) {
+            if let Err(err) = self.start_background_refresh(reason) {
                 log::error!("Monitor refresh failed: {err}");
             }
         }
@@ -233,6 +326,17 @@ impl<D: Devices> Controller<D> {
     }
 
     fn next_deadline(&self) -> Instant {
+        if self.active_refresh.is_some() {
+            // Completion wakes poll directly; do not spin on overdue scan deadlines.
+            return if self.mode == BacklightMode::Manual && self.manual_forever {
+                Instant::now() + Duration::from_secs(86400)
+            } else {
+                self.deadline
+            };
+        }
+        if self.resume_pending {
+            return Instant::now();
+        }
         let deadline = if self.mode == BacklightMode::Manual && self.manual_forever {
             self.refresh_deadline
         } else {
@@ -301,6 +405,9 @@ impl<D: Devices> Controller<D> {
             | BacklightCommand::GetDeviceInfo(_)
             | BacklightCommand::NotifyHotplug => {}
             BacklightCommand::Refresh => {
+                if self.active_refresh.is_some() {
+                    self.finish_background_refresh()?;
+                }
                 // Only skip requests received before the last scan started.
                 // An event during that scan still requires one follow-up scan.
                 if self
@@ -333,24 +440,71 @@ pub(crate) fn run_controller(
     receiver: Receiver<Request>,
     stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
+    run_with_devices(receiver, stopping, Monitors::default())
+}
+
+fn run_with_devices<D: Devices>(
+    receiver: Receiver<Request>,
+    stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    devices: D,
+) -> anyhow::Result<()> {
     if stopping.load(std::sync::atomic::Ordering::Acquire) {
         return Ok(());
     }
-    let mut controller = Controller::new(Monitors);
+    let mut controller = Controller::new(devices);
     if let Err(err) = controller.refresh("startup") {
         log::error!("Initial monitor refresh failed: {err}");
     }
+    let mut refresh_waiters: Vec<Request> = Vec::new();
     loop {
         if stopping.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
+        controller.service_deadlines();
+        refresh_waiters.retain(|request| {
+            if !controller
+                .last_refresh_completed_started
+                .is_some_and(|started| request.received_at <= started)
+            {
+                return true;
+            }
+            let result = match &controller.last_refresh_error {
+                Some(err) => Err(anyhow::anyhow!("Refresh failed: {err}")),
+                None => Ok(BacklightInfo {
+                    brightness_percent: controller.devices.brightness(),
+                    mode: controller.mode,
+                    device: None,
+                }),
+            };
+            let _ = request.reply.send(result);
+            false
+        });
+        if !refresh_waiters.is_empty() && controller.active_refresh.is_none() {
+            if let Err(err) = controller.start_background_refresh("requested") {
+                log::error!("Requested refresh failed: {err}");
+            }
+            // Synchronous test adapters and spawn failures complete immediately.
+            if controller.active_refresh.is_none() {
+                continue;
+            }
+        }
         let deadline = controller.next_deadline();
-        let request = receiver.recv_until(deadline);
+        let request = receiver.recv_until_notified(deadline, controller.devices.refresh_fd());
         if stopping.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
         }
         match request {
             Ok(Some(request)) => {
+                if matches!(request.command, BacklightCommand::Refresh) {
+                    if refresh_waiters.len() >= crate::MAX_CLIENTS {
+                        let _ = request
+                            .reply
+                            .send(Err(anyhow::anyhow!("Too many pending refresh requests")));
+                    } else {
+                        refresh_waiters.push(request);
+                    }
+                    continue;
+                }
                 if let Some(config) = request.reload {
                     controller.reload(config);
                     continue;
@@ -443,6 +597,152 @@ mod tests {
         c.adjust().unwrap();
         c
     }
+    struct BackgroundFake {
+        inner: Fake,
+        gates: std::collections::VecDeque<std::sync::mpsc::Receiver<()>>,
+        started: std::sync::mpsc::Sender<()>,
+        worker: Option<crate::discovery::Enumeration<()>>,
+    }
+    impl Devices for BackgroundFake {
+        fn execute(&mut self, command: BacklightCommand) -> anyhow::Result<()> {
+            self.inner.execute(command)
+        }
+        fn refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+            self.inner.refresh(reason)
+        }
+        fn set_manual_target(&mut self, target: Option<u8>) {
+            self.inner.set_manual_target(target);
+        }
+        fn brightness(&self) -> u8 {
+            self.inner.brightness()
+        }
+        fn automatic(&mut self) -> anyhow::Result<(u8, Duration)> {
+            self.inner.automatic()
+        }
+        fn start_refresh(&mut self) -> anyhow::Result<bool> {
+            let gate = self.gates.pop_front();
+            self.worker = Some(crate::discovery::Enumeration::spawn(move || {
+                if let Some(gate) = gate {
+                    gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            })?);
+            self.started.send(()).unwrap();
+            Ok(true)
+        }
+        fn refresh_fd(&self) -> Option<std::os::fd::RawFd> {
+            self.worker.as_ref().map(|worker| worker.fd())
+        }
+        fn refresh_ready(&self) -> bool {
+            self.worker.as_ref().is_some_and(|worker| worker.ready())
+        }
+        fn finish_refresh(&mut self, reason: &str) -> anyhow::Result<()> {
+            self.worker.take().unwrap().finish()?;
+            self.inner.refresh(reason)
+        }
+    }
+
+    #[test]
+    fn background_and_explicit_discovery_do_not_block_commands_or_overwrite_targets() {
+        let (sender, receiver) = crate::wake::channel().unwrap();
+        let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (first, first_gate) = std::sync::mpsc::channel();
+        let (second, second_gate) = std::sync::mpsc::channel();
+        let (started, starts) = std::sync::mpsc::channel();
+        let devices = BackgroundFake {
+            inner: controller().devices,
+            gates: [first_gate, second_gate].into(),
+            started,
+            worker: None,
+        };
+        let stop = stopping.clone();
+        let runner = std::thread::spawn(move || run_with_devices(receiver, stop, devices));
+        let request = |command| {
+            let (reply, response) = std::sync::mpsc::channel();
+            sender
+                .send(Request {
+                    command,
+                    reload: None,
+                    received_at: Instant::now(),
+                    reply,
+                })
+                .unwrap();
+            response
+        };
+        let response = |reply: std::sync::mpsc::Receiver<anyhow::Result<BacklightInfo>>| {
+            reply.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()
+        };
+        // Ensure startup has completed before sending a new hotplug event.
+        response(request(BacklightCommand::GetInfo));
+        response(request(BacklightCommand::NotifyHotplug));
+        starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            response(request(BacklightCommand::SetBrightness(70))).brightness_percent,
+            70
+        );
+        let refresh = request(BacklightCommand::Refresh);
+        assert_eq!(
+            response(request(BacklightCommand::IncreaseBrightness(5))).brightness_percent,
+            75
+        );
+        assert!(matches!(
+            refresh.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        first.send(()).unwrap();
+        // A request received during enumeration needs a scan started afterwards.
+        starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            response(request(BacklightCommand::SetBrightness(80))).brightness_percent,
+            80
+        );
+        assert!(matches!(
+            refresh.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        second.send(()).unwrap();
+        // Completion must wake the controller even without another client request.
+        let refreshed = response(refresh);
+        assert_eq!(
+            (refreshed.brightness_percent, refreshed.mode),
+            (80, BacklightMode::Manual)
+        );
+        stopping.store(true, std::sync::atomic::Ordering::Release);
+        drop(sender);
+        runner.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn pending_hotplug_and_resume_survive_background_discovery_and_manual_expiry() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let (started, _starts) = std::sync::mpsc::channel();
+        let mut c = Controller::new(BackgroundFake {
+            inner: controller().devices,
+            gates: [gate].into(),
+            started,
+            worker: None,
+        });
+        c.command(BacklightCommand::SetBrightness(75)).unwrap();
+        c.start_background_refresh("scheduled").unwrap();
+        let event = c.last_refresh_started.unwrap() + Duration::from_millis(1);
+        c.notify_hotplug(event, Instant::now());
+        c.pending_refresh.as_mut().unwrap().deadline = Instant::now();
+        c.deadline = Instant::now();
+        c.service_deadlines_after_resume(true);
+        assert_eq!(c.mode, BacklightMode::Auto);
+        assert_eq!(c.devices.inner.manual_target, None);
+        assert!(c.resume_pending);
+        assert!(c.pending_refresh.is_some());
+        assert!(c.next_deadline() > Instant::now());
+        release.send(()).unwrap();
+        c.finish_background_refresh().unwrap();
+        assert_eq!(c.devices.inner.brightness, 50);
+        c.service_deadlines_after_resume(false);
+        assert_eq!(c.active_refresh.as_ref().unwrap().0, "resume");
+        assert!(!c.resume_pending);
+        assert!(c.pending_refresh.is_none());
+        c.finish_background_refresh().unwrap();
+    }
+
     #[test]
     fn reload_preserves_manual_start_and_supports_forever() {
         let mut c = controller();

@@ -28,6 +28,7 @@ mod calibration;
 mod config;
 mod controller;
 mod ddc;
+mod discovery;
 mod location;
 mod monitors;
 mod shutdown;

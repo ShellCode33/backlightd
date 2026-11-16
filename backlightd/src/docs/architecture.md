@@ -25,9 +25,20 @@ connection; it never shuts down the system daemon. `NotifyHotplug` enqueues a
 notification without waiting for device discovery or returning status.
 
 The controller owns ordering of commands, discovery, mode changes, and deadlines.
-A brightness command waits for an active scan. This is intentional: relative
-adjustments and subsequent writes should use the rebuilt device list. Hardware
-adapters must not introduce independent discovery or writes from client threads.
+Linux bus/EDID enumeration runs in a single worker. Brightness commands use the
+current devices while it runs. EDID uses I2C address 0x50, while DDC/CI uses 0x37;
+kernel transfers serialize bus access and each descriptor keeps its own address.
+Brightness/power VCP operations, initialization probes, and sysfs discovery stay
+on the controller, avoiding competing DDC/CI request/reply sequences.
+
+Worker completion wakes the existing poll loop through a socket endpoint closing,
+including on panic. No scan-completion polling or new timer is needed. The worker
+returns handles/EDID only, so brightness is probed on application using the latest
+configuration and mode. Startup and error recovery remain synchronous. Short VCP
+probes, retries, and blocked hardware I/O can still delay commands.
+
+An explicit refresh queues a bounded reply waiter. Other clients keep operating
+while it enumerates. Shutdown joins the enumeration worker before returning.
 
 ## Discovery and recovery
 

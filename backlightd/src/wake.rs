@@ -138,7 +138,16 @@ impl<T> Receiver<T> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn recv_until(&self, deadline: Instant) -> io::Result<Option<T>> {
+        self.recv_until_notified(deadline, None)
+    }
+
+    pub(crate) fn recv_until_notified(
+        &self,
+        deadline: Instant,
+        completion: Option<std::os::fd::RawFd>,
+    ) -> io::Result<Option<T>> {
         self.arm(deadline)?;
         loop {
             let mut socket = &self.wake;
@@ -178,6 +187,11 @@ impl<T> Receiver<T> {
                     events: libc::POLLIN,
                     revents: 0,
                 },
+                libc::pollfd {
+                    fd: completion.unwrap_or(-1),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             // SAFETY: fds is a writable array, both descriptors stay valid.
             if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
@@ -187,7 +201,7 @@ impl<T> Receiver<T> {
                 }
                 return Err(err);
             }
-            if fds
+            if fds[..2]
                 .iter()
                 .any(|fd| fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0)
             {
@@ -195,7 +209,7 @@ impl<T> Receiver<T> {
             }
             // A one-shot timer needs no read here: the boottime deadline is now
             // due. An early expiration from clock sampling is rearmed next time.
-            if fds[1].revents & libc::POLLIN != 0 {
+            if fds[1].revents & libc::POLLIN != 0 || fds[2].revents != 0 {
                 return Ok(None);
             }
         }

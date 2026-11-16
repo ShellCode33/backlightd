@@ -54,10 +54,23 @@ Do not emulate it by zeroing brightness or claim that it controls compositor DPM
 
 ### Ordering and device discovery
 
-The controller owns the sequence of device operations. Commands intentionally
-wait for an active scan to finish so subsequent adjustments use refreshed devices
-and readings. Do not move discovery to an independent worker without an explicit
-ordering design and agreement on the behavioral change.
+The controller owns all DDC/CI brightness/power operations, initialization probes,
+and device-list application. `discovery.rs` enumerates Linux buses and reads EDID
+in one worker; brightness, status, mode changes, and reload continue against the
+current devices. EDID uses address 0x50, separate from DDC/CI 0x37, with kernel
+I2C transfer serialization and separate descriptors. Do not move VCP probes into
+that worker without designing request/reply locking and cross-handle delays.
+
+On completion the controller probes brightness and applies the latest config and
+mode/target, so enumeration cannot overwrite newer commands with stale readings.
+A socket endpoint closes on worker success or panic to wake poll without polling
+or a completion sender keeping the request queue alive. Join the worker during
+shutdown. Startup and failed-operation recovery still scan synchronously; individual
+hardware operations and retrying VCP probes can still delay commands.
+
+Explicit `--refresh` waits for its own covering scan, while other clients continue
+issuing brightness commands. Keep refresh waiters bounded by the client limit.
+A scan must have started after a request/event was received to cover it.
 
 Full discovery runs at startup, on refresh, after detected resume, during error
 recovery, and every 60 seconds. The periodic scan is a deliberate safeguard for

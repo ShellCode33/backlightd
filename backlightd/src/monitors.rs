@@ -88,19 +88,32 @@ pub(crate) fn device_info(index: usize) -> Option<backlight_ipc::DeviceInfo> {
 }
 
 pub(crate) fn refresh_monitors_list(reason: &str) -> anyhow::Result<()> {
-    let mut failures = 0;
-    let started = Instant::now();
-    log::debug!("Discovery started: reason={reason}");
-    // Called only by the controller, including recovery after device errors.
-    let mut new_monitors: Vec<Box<dyn BacklightDevice + Send>> = Vec::new();
+    refresh_with_displays(reason, enumerate_displays())
+}
 
-    let enumeration_started = Instant::now();
+pub(crate) fn enumerate_displays() -> Vec<ddc_hi::Display> {
+    let started = Instant::now();
+    // On Linux ddc-hi enumeration only reads EDID (address 0x50), never DDC/CI
+    // brightness/power (0x37). Kernel I2C transfers serialize bus access; separate
+    // descriptors retain their own slave address. VCP request/reply sequences
+    // remain on the controller, including initialization below.
     let displays = ddc_hi::Display::enumerate();
     log::debug!(
         "Discovery stage=ddc_enumeration candidates={} elapsed_ms={}",
         displays.len(),
-        enumeration_started.elapsed().as_millis()
+        started.elapsed().as_millis()
     );
+    displays
+}
+
+pub(crate) fn refresh_with_displays(
+    reason: &str,
+    displays: Vec<ddc_hi::Display>,
+) -> anyhow::Result<()> {
+    let mut failures = 0;
+    let started = Instant::now();
+    log::debug!("Discovery started: reason={reason}");
+    let mut new_monitors: Vec<Box<dyn BacklightDevice + Send>> = Vec::new();
     for ddc_device in displays {
         let id = ddc_device.info.id.clone();
         let device_started = Instant::now();

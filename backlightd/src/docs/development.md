@@ -13,7 +13,7 @@
 
 Executable source files are `main.rs`, `controller.rs`, `monitors.rs`, `sysfs.rs`,
 `ddc.rs`, `calibration.rs`, `config.rs`, `auto.rs`, `location.rs`, `socket.rs`,
-`shutdown.rs`, and `wake.rs`. Generate private-item documentation locally to browse
+`shutdown.rs`, `discovery.rs`, and `wake.rs`. Generate private-item documentation locally to browse
 the internal types and functions; their visibility is intentionally not a public
 library commitment.
 
